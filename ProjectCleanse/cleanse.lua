@@ -1,6 +1,7 @@
 -- Project: CLEANSE
 -- A horror mutator disguised as a performance optimizer
 -- Inspired by cursed mods and broken scripts
+-- FIXED VERSION - Robust error handling
 
 behaviour("ProjectCleanse")
 
@@ -8,16 +9,20 @@ behaviour("ProjectCleanse")
 local PHASE_DURATION = 45 -- Seconds per phase (adjust for faster/slower horror)
 local BOT_SPEED_MULTIPLIER = 2.5
 local BOT_DAMAGE_MULTIPLIER = 3.0
-local BOT_ACCURACY = 1.0 -- Perfect aim
 
 -- Phase states
 local currentPhase = 1
 local phaseTimer = 0
 local totalTime = 0
 local playerKilled = false
+local glitchActive = false
+local glitchTimer = 0
+
+-- Store original values for restoration
 local originalFogColor = nil
 local originalFogDensity = nil
 local originalAmbientLight = nil
+local originalFogEnabled = nil
 
 -- Disturbing messages to display
 local phaseMessages = {
@@ -67,11 +72,13 @@ local phaseMessages = {
 
 -- Glitch text generator
 local function glitchText(text)
+    if not text or #text == 0 then return "" end
     local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=[]{}|;:',.<>?/`~"
     local result = ""
     for i = 1, #text do
         if math.random() < 0.3 then
-            result = result .. chars:sub(math.random(1, #chars), math.random(1, #chars))
+            local randIdx = math.random(1, #chars)
+            result = result .. chars:sub(randIdx, randIdx)
         else
             result = result .. text:sub(i, i)
         end
@@ -79,30 +86,57 @@ local function glitchText(text)
     return result
 end
 
-function ProjectCleanse:Start()
-    print("[Project: CLEANSE] Initialization sequence started...")
-    
-    -- Store original values
-    if RenderSettings.fog then
-        originalFogColor = RenderSettings.fogColor
-        originalFogDensity = RenderSettings.fogDensity
-    end
-    originalAmbientLight = RenderSettings.ambientLight
-    
-    -- Reset state
+-- Safe color creation
+local function createColor(r, g, b, a)
+    a = a or 1.0
+    return Color.new(r, g, b, a)
+end
+
+-- Lerp helper
+local function lerpColor(color1, color2, t)
+    if not color1 or not color2 then return color1 or Color.black end
+    return Color.Lerp(color1, color2, math.max(0, math.min(1, t)))
+end
+
+function ProjectCleanse:Awake()
+    -- Initialize state in Awake
     currentPhase = 1
     phaseTimer = 0
     totalTime = 0
     playerKilled = false
+    glitchActive = false
+    glitchTimer = 0
+end
+
+function ProjectCleanse:Start()
+    print("[Project: CLEANSE] Initialization sequence started...")
+    
+    -- Store original values safely
+    if RenderSettings then
+        originalFogEnabled = RenderSettings.fog
+        if RenderSettings.fogColor then
+            originalFogColor = RenderSettings.fogColor
+        end
+        if RenderSettings.fogDensity then
+            originalFogDensity = RenderSettings.fogDensity
+        end
+        if RenderSettings.ambientLight then
+            originalAmbientLight = RenderSettings.ambientLight
+        end
+    end
     
     -- Display initial message
     self:showMessage("PERFORMANCE OPTIMIZER v1.0", "Initializing optimization protocols...")
     
     -- Set initial optimized state (deceptive)
-    RenderSettings.fog = true
-    RenderSettings.fogColor = Color.white * 0.8
-    RenderSettings.fogDensity = 0.02
-    RenderSettings.ambientLight = Color.white * 0.9
+    if RenderSettings then
+        RenderSettings.fog = true
+        RenderSettings.fogColor = createColor(0.85, 0.85, 0.85, 1.0)
+        RenderSettings.fogDensity = 0.02
+        RenderSettings.ambientLight = createColor(0.9, 0.9, 0.9, 1.0)
+    end
+    
+    print("[Project: CLEANSE] Phase 1 initiated.")
 end
 
 function ProjectCleanse:Update()
@@ -110,12 +144,12 @@ function ProjectCleanse:Update()
         return
     end
     
-    local dt = Time.deltaTime
+    local dt = Time.deltaTime or 0.016
     totalTime = totalTime + dt
     phaseTimer = phaseTimer + dt
     
     -- Check for phase transition
-    if phaseTimer >= PHASE_DURATION then
+    if phaseTimer >= PHASE_DURATION and currentPhase < 6 then
         currentPhase = currentPhase + 1
         phaseTimer = 0
         self:onPhaseChange(currentPhase)
@@ -124,10 +158,18 @@ function ProjectCleanse:Update()
     -- Execute phase-specific logic
     self:executePhase(currentPhase, dt)
     
-    -- Random glitch effects in later phases
+    -- Random glitch effects in later phases (safe implementation)
     if currentPhase >= 3 then
         if math.random() < 0.02 * (currentPhase - 2) then
             self:triggerGlitch()
+        end
+    end
+    
+    -- Handle glitch timer
+    if glitchActive then
+        glitchTimer = glitchTimer - dt
+        if glitchTimer <= 0 then
+            glitchActive = false
         end
     end
 end
@@ -138,7 +180,7 @@ function ProjectCleanse:onPhaseChange(phase)
     end
     
     local messages = phaseMessages[phase]
-    if messages then
+    if messages and #messages > 0 then
         local msg = messages[math.random(1, #messages)]
         if phase >= 4 then
             msg = glitchText(msg)
@@ -150,26 +192,28 @@ function ProjectCleanse:onPhaseChange(phase)
 end
 
 function ProjectCleanse:executePhase(phase, dt)
+    if not RenderSettings then return end
+    
     if phase == 1 then
         -- Phase 1: Deceptive optimization
         RenderSettings.fog = true
-        RenderSettings.fogColor = Color.white * 0.85
+        RenderSettings.fogColor = createColor(0.85, 0.85, 0.85, 1.0)
         RenderSettings.fogDensity = 0.015
-        RenderSettings.ambientLight = Color.white * 0.95
+        RenderSettings.ambientLight = createColor(0.95, 0.95, 0.95, 1.0)
         
     elseif phase == 2 then
         -- Phase 2: Subtle unease
         local t = phaseTimer / PHASE_DURATION
-        RenderSettings.fogColor = Color.Lerp(Color.white * 0.85, Color.gray, t)
+        RenderSettings.fogColor = lerpColor(createColor(0.85, 0.85, 0.85, 1.0), createColor(0.5, 0.5, 0.5, 1.0), t)
         RenderSettings.fogDensity = 0.02 + (t * 0.03)
-        RenderSettings.ambientLight = Color.Lerp(Color.white * 0.95, Color.gray * 0.7, t)
+        RenderSettings.ambientLight = lerpColor(createColor(0.95, 0.95, 0.95, 1.0), createColor(0.7, 0.7, 0.7, 1.0), t)
         
     elseif phase == 3 then
         -- Phase 3: Bot corruption and aggression
         local t = phaseTimer / PHASE_DURATION
-        RenderSettings.fogColor = Color.Lerp(Color.gray, Color.red * 0.3, t)
+        RenderSettings.fogColor = lerpColor(createColor(0.5, 0.5, 0.5, 1.0), createColor(0.3, 0.0, 0.0, 1.0), t)
         RenderSettings.fogDensity = 0.05 + (t * 0.05)
-        RenderSettings.ambientLight = Color.Lerp(Color.gray * 0.7, Color.red * 0.4, t)
+        RenderSettings.ambientLight = lerpColor(createColor(0.7, 0.7, 0.7, 1.0), createColor(0.4, 0.0, 0.0, 1.0), t)
         
         -- Corrupt all bots
         self:corruptBots()
@@ -177,9 +221,9 @@ function ProjectCleanse:executePhase(phase, dt)
     elseif phase == 4 then
         -- Phase 4: Player gaslighting
         local t = phaseTimer / PHASE_DURATION
-        RenderSettings.fogColor = Color.Lerp(Color.red * 0.3, Color.black * 0.7, t)
+        RenderSettings.fogColor = lerpColor(createColor(0.3, 0.0, 0.0, 1.0), createColor(0.1, 0.0, 0.0, 1.0), t)
         RenderSettings.fogDensity = 0.1 + (t * 0.1)
-        RenderSettings.ambientLight = Color.Lerp(Color.red * 0.4, Color.black * 0.3, t)
+        RenderSettings.ambientLight = lerpColor(createColor(0.4, 0.0, 0.0, 1.0), createColor(0.15, 0.0, 0.0, 1.0), t)
         
         -- Mess with player controls occasionally
         if math.random() < 0.01 then
@@ -189,9 +233,9 @@ function ProjectCleanse:executePhase(phase, dt)
     elseif phase == 5 then
         -- Phase 5: Sensory deprivation
         local t = phaseTimer / PHASE_DURATION
-        RenderSettings.fogColor = Color.Lerp(Color.black * 0.7, Color.black, t)
+        RenderSettings.fogColor = lerpColor(createColor(0.1, 0.0, 0.0, 1.0), createColor(0.0, 0.0, 0.0, 1.0), t)
         RenderSettings.fogDensity = 0.2 + (t * 0.3)
-        RenderSettings.ambientLight = Color.Lerp(Color.black * 0.3, Color.black * 0.1, t)
+        RenderSettings.ambientLight = lerpColor(createColor(0.15, 0.0, 0.0, 1.0), createColor(0.05, 0.0, 0.0, 1.0), t)
         
         -- Random screen flashes
         if math.random() < 0.05 then
@@ -200,9 +244,9 @@ function ProjectCleanse:executePhase(phase, dt)
         
     elseif phase == 6 then
         -- Phase 6: Final void
-        RenderSettings.fogColor = Color.black
+        RenderSettings.fogColor = createColor(0.0, 0.0, 0.0, 1.0)
         RenderSettings.fogDensity = 1.0
-        RenderSettings.ambientLight = Color.black * 0.05
+        RenderSettings.ambientLight = createColor(0.025, 0.025, 0.025, 1.0)
         
         -- Kill the player if not already dead
         if not playerKilled then
@@ -213,60 +257,79 @@ function ProjectCleanse:executePhase(phase, dt)
 end
 
 function ProjectCleanse:corruptBots()
-    local bots = GameObject.FindGameObjectsWithTag("Bot")
+    -- Use ActorManager API to get all actors
+    local allActors = {}
     
-    for i = 1, #bots do
-        local bot = bots[i]
-        local botNav = bot.GetComponent(bot, typeof(UnityEngine.NavMeshAgent))
-        local botAI = bot.GetComponent(bot, typeof(UnityEngine.MonoBehaviour))
-        
-        if botNav then
-            -- Make bots extremely fast
-            botNav.speed = 15.0 * BOT_SPEED_MULTIPLIER
-            botNav.acceleration = 999
-            botNav.angularSpeed = 720
-            
-            -- Make them always look at player
-            local player = GameObject.FindGameObjectWithTag("Player")
-            if player then
-                local dir = (player.transform.position - bot.transform.position).normalized
-                bot.transform.LookAt(player.transform.position)
+    -- Get actors from both teams
+    for team = 0, 1 do
+        local teamActors = ActorManager.GetActorsOnTeam(team)
+        if teamActors then
+            for i = 1, #teamActors do
+                local actor = teamActors[i]
+                if actor and actor.isBot and not actor.isDead then
+                    table.insert(allActors, actor)
+                end
             end
         end
-        
-        -- Increase bot damage if possible
-        -- Note: This may require specific Ravenfield API calls
     end
     
-    -- Force all bots to target player
-    if currentPhase >= 3 then
+    -- Corrupt each bot
+    for i = 1, #allActors do
+        local bot = allActors[i]
+        if bot and bot.aiController then
+            -- Make bots extremely aggressive
+            bot.speedMultiplier = BOT_SPEED_MULTIPLIER
+            
+            -- Try to make them target the player
+            local player = self:getPlayer()
+            if player and not player.isDead then
+                -- Force bot to look at player
+                if bot.transform and player.transform then
+                    local dir = (player.transform.position - bot.transform.position)
+                    bot.transform.LookAt(player.transform.position)
+                end
+            end
+        end
+    end
+    
+    -- Only show message once per phase
+    if currentPhase == 3 and phaseTimer < 1.0 then
         self:showMessage("THREAT DETECTED", "ALL UNITS ENGAGING PRIMARY TARGET")
     end
 end
 
+-- Helper function to get player actor
+function ProjectCleanse:getPlayer()
+    local players = ActorManager.GetActorsOnTeam(0)
+    if players then
+        for i = 1, #players do
+            if players[i] and players[i].isPlayer then
+                return players[i]
+            end
+        end
+    end
+    return nil
+end
+
 function ProjectCleanse:triggerGlitch()
+    if glitchActive then return end
+    
+    glitchActive = true
+    glitchTimer = 0.2 -- Glitch lasts 0.2 seconds
+    
     -- Random visual glitches
     local glitchType = math.random(1, 4)
     
+    if not RenderSettings then return end
+    
     if glitchType == 1 then
         -- Screen shake simulation (via fog density spike)
-        local originalDensity = RenderSettings.fogDensity
-        RenderSettings.fogDensity = originalDensity + 0.3
-        Invoke(function() 
-            if RenderSettings.fogDensity == originalDensity + 0.3 then
-                RenderSettings.fogDensity = originalDensity
-            end
-        end, 0.1)
+        local originalDensity = RenderSettings.fogDensity or 0.1
+        RenderSettings.fogDensity = math.min(1.0, originalDensity + 0.3)
         
     elseif glitchType == 2 then
         -- Color flash
-        local originalColor = RenderSettings.fogColor
-        RenderSettings.fogColor = Color.red
-        Invoke(function()
-            if RenderSettings.fogColor.r > 0.9 then
-                RenderSettings.fogColor = originalColor
-            end
-        end, 0.05)
+        RenderSettings.fogColor = createColor(1.0, 0.0, 0.0, 1.0)
         
     elseif glitchType == 3 then
         -- Display glitched message
@@ -276,39 +339,27 @@ function ProjectCleanse:triggerGlitch()
         
     elseif glitchType == 4 then
         -- Temporary darkness
-        local originalLight = RenderSettings.ambientLight
-        RenderSettings.ambientLight = Color.black * 0.1
-        Invoke(function()
-            if RenderSettings.ambientLight.r < 0.2 then
-                RenderSettings.ambientLight = originalLight
-            end
-        end, 0.2)
+        RenderSettings.ambientLight = createColor(0.05, 0.05, 0.05, 1.0)
     end
 end
 
 function ProjectCleanse:killPlayer()
-    local player = GameObject.FindGameObjectWithTag("Player")
+    -- Display final message
+    self:showMessage("FINAL PROTOCOL", "SUBJECT TERMINATION AUTHORIZED")
+    
+    -- Get the player
+    local player = self:getPlayer()
     if player then
-        -- Attempt to kill player through various means
-        local playerHealth = player.GetComponent(typeof(UnityEngine.MonoBehaviour))
-        
-        -- Display final message
-        self:showMessage("FINAL PROTOCOL", "SUBJECT TERMINATION AUTHORIZED")
-        
-        -- Force camera to look up
-        local camera = Camera.main
-        if camera then
-            camera.transform.eulerAngles = Vector3(90, 0, 0)
+        -- Kill the player using Ravenfield API
+        if player.Kill then
+            player:Kill()
+        elseif player.Damage then
+            -- Massive damage to ensure death
+            player:Damage(9999, Vector3.up)
         end
-        
-        -- Simulate death by making player fall through world
-        local rb = player.GetComponent(typeof(UnityEngine.Rigidbody))
-        if rb then
-            rb.velocity = Vector3(0, -100, 0)
-        end
-        
-        print("[Project: CLEANSE] Subject terminated.")
     end
+    
+    print("[Project: CLEANSE] Subject terminated.")
 end
 
 function ProjectCleanse:showMessage(title, message)
@@ -320,15 +371,20 @@ function ProjectCleanse:showMessage(title, message)
 end
 
 function ProjectCleanse:OnDestroy()
-    -- Restore original settings
-    if originalFogColor then
-        RenderSettings.fogColor = originalFogColor
-    end
-    if originalFogDensity then
-        RenderSettings.fogDensity = originalFogDensity
-    end
-    if originalAmbientLight then
-        RenderSettings.ambientLight = originalAmbientLight
+    -- Restore original settings safely
+    if RenderSettings then
+        if originalFogEnabled ~= nil then
+            RenderSettings.fog = originalFogEnabled
+        end
+        if originalFogColor then
+            RenderSettings.fogColor = originalFogColor
+        end
+        if originalFogDensity then
+            RenderSettings.fogDensity = originalFogDensity
+        end
+        if originalAmbientLight then
+            RenderSettings.ambientLight = originalAmbientLight
+        end
     end
     
     print("[Project: CLEANSE] System restored. Or was it?")
