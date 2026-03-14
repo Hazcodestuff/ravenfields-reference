@@ -1,0 +1,13 @@
+{
+  "name": "Project: CLEANSE",
+  "version": "1.0",
+  "author": "YourNameHere",
+  "description": "Performance Optimizer v1.0 - Enhances game performance by removing unnecessary visual effects and optimizing AI behavior. Recommended for low-end systems.",
+  "category": "Mutator",
+  "tags": ["mutator", "performance", "optimization"],
+  "script": "cleanse.lua",
+  "thumbnail": "thumbnail.png",
+  "previewImages": [],
+  "dependencies": [],
+  "conflictsWith": []
+}
