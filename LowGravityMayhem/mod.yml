@@ -1,0 +1,42 @@
+name: Low Gravity Mayhem
+description: "Experience Ravenfield like you're on the moon! This mutator reduces gravity to 30% of normal, allowing for incredible jumps and chaotic aerial combat. Perfect for fun, arcade-style gameplay!"
+
+author: YourNameHere
+version: 1.0
+
+mutators:
+  - name: Low Gravity Mayhem
+    script: LowGravityMayhem.lua
+    icon: icon.png
+
+tags:
+  - mutator
+  - gameplay
+  - fun
+  - lowgravity
+  - moonjump
+
+workshop_description: |
+  🌙 LOW GRAVITY MAYHEM 🌙
+  
+  Ever wanted to jump like you're on the moon? Now you can!
+  
+  Features:
+  • Reduced gravity (30% of normal)
+  • Insane jump heights
+  • Chaotic aerial combat
+  • Works with all maps and game modes
+  • No conflicts with other mutators
+  
+  How to use:
+  1. Subscribe to this mod
+  2. Start a new battle
+  3. Enable "Low Gravity Mayhem" in the mutators menu
+  4. Jump around and have fun!
+  
+  Tips:
+  • Use explosives for even crazier launches
+  • Try sniping from high vantage points
+  • Vehicle combat gets really interesting!
+  
+  Enjoy the chaos! 🚀
