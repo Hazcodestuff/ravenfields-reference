@@ -1,0 +1,1966 @@
+
+-- ============================================================================
+-- TheAnomaly_ExcessiveEdition_Final_RC.raven
+-- Final Release Candidate:
+-- - Karma system
+-- - Timeline director & dialogue
+-- - RISE_WATER (flood), WORLD_PAINT (bleed), FALSE_HOPE (trap crate)
+-- - Hardened pick(), phantom force-destruction
+-- - FinalFadeToBlack on match end
+-- - Polished UI + priority system
+-- ============================================================================
+
+behaviour("TheAnomaly_ExcessiveEdition")
+
+-- ===========================
+-- CONFIGURATION
+-- ===========================
+local CFG = {
+    STARTUP_GRACE = 15.0,
+    SANITY_DECAY_PER_SEC = 0.025,
+    TASK_COOLDOWN = 8.0,
+    UI_REFRESH = 0.18,
+    TIMER_TICK = 1.0,
+    BUFF_DURATION = 20.0,
+    BUFF_SPEED_MULT = 1.30,
+    MAX_O_PRESS = 16,
+    SKIP_PER_LIFE_PENALTY = 3,
+    SKIP_MINOR_HIT = 10,
+    SKIP_MAJOR_HIT = 28,
+    SKIP_AMMO_RATIO = 0.4,
+    EVENT_COOLDOWN_SMALL = 18.0,
+    EVENT_COOLDOWN_LARGE = 90.0,
+    PHASE2_TASKS = 4,
+    PHASE3_TASKS = 10,
+    PHASE2_TIME = 600,   -- 10 minutes
+PHASE3_TIME = 1200,  -- 20 minutes
+PHASE4_TIME = 1800,  -- 30 minutes (enter Phase 4)
+ACT_END_TIME = 2400, -- optional final ramp at 40 minutes (not used yet)
+    NAME_STEAL_DURATION = 12.0,
+    PHANTOM_DURATION = 10.0,
+    FAKE_CHAT_DURATION = 10.0,
+    OBSERVER_RANGE = 120.0,
+    MAX_SCHEDULED = 300,
+    FLOOD_STEP = 0.25,         -- meters per tick for flood
+    FLOOD_TICK = 0.5           -- tick frequency for flood
+}
+
+local DEBUG = { LOGGING_ENABLED = true, TIMESKIP_ENABLED = true, VERBOSE = false }
+
+-- ===========================
+-- TASKS (kept compact; you can extend)
+-- ===========================
+local TASK_POOL = {
+    -- Original / Common (phase 1)
+    { id="RIFLE_5", display="Eliminate 5 enemies with a rifle.", type="WEAPON_ROLE", roleSet={WeaponRole.AutoRifle, WeaponRole.SemiAutoRifle, WeaponRole.Sniper}, required=5, timeLimit=70, phaseMin=1, rarity=1 },
+    { id="HANDGUN_4", display="Get 4 kills with a handgun.", type="WEAPON_ROLE", roleSet={WeaponRole.Handgun}, required=4, timeLimit=55, phaseMin=1, rarity=1 },
+    { id="SHOTGUN_2", display="Blast 2 enemies with a shotgun.", type="WEAPON_ROLE", roleSet={WeaponRole.Shotgun}, required=2, timeLimit=40, phaseMin=1, rarity=1 },
+    { id="HEADS_3", display="Achieve 3 headshot kills.", type="HEADSHOT", required=3, timeLimit=50, phaseMin=1, rarity=1 },
+    { id="SURVIVE_30", display="Survive for 30 seconds.", type="SURVIVE", required=30, timeLimit=30, phaseMin=1, rarity=1 },
+    { id="NOFIRE_20", display="Don't fire for 20 seconds.", type="NO_FIRE", required=20, timeLimit=20, phaseMin=1, rarity=1 },
+    { id="DAMAGE_5", display="Damage 5 different enemies.", type="DAMAGE", required=5, timeLimit=70, phaseMin=1, rarity=1 },
+    { id="STILL_10", display="Stand still for 10 seconds.", type="STAND_STILL", required=10, timeLimit=15, phaseMin=1, rarity=1 },
+
+    -- Extra common / variety
+    { id="SUPPRESS_10", display="Suppress 10 enemies for 15s.", type="SUPPRESS", required=10, timeLimit=20, phaseMin=1, rarity=1 },
+    { id="RELOAD_FAST", display="Reload 3 times within 12s.", type="RELOAD", required=3, timeLimit=12, phaseMin=1, rarity=1 },
+    { id="CAPTURE_1", display="Capture a point.", type="CAPTURE", required=1, timeLimit=60, phaseMin=1, rarity=1 },
+    { id="HELP_SQUAD", display="Heal or revive a teammate.", type="AID", required=1, timeLimit=45, phaseMin=1, rarity=2 },
+
+    -- Uncommon / late phase intro (phase 2)
+    { id="WHISPER_1", display="Survive while whispers play for 10s.", type="WHISPER", required=10, timeLimit=20, phaseMin=2, rarity=2 },
+    { id="STAND_STILL_20", display="Stand still for 20 seconds.", type="STAND_STILL", required=20, timeLimit=25, phaseMin=2, rarity=2 },
+    { id="NEUTRAL_2", display="Eliminate 2 neutral targets.", type="WEIRD_NEUTRAL", required=2, timeLimit=60, phaseMin=2, rarity=2 },
+    { id="STAY_MARKER_40", display="Find the marker and hold your position for 40s.", type="STAY_MARKER", required=40, timeLimit=80, phaseMin=2, rarity=2 },
+
+    -- Uncommon / variety
+    { id="SNIPER_2", display="Kill 2 enemies with a sniper rifle.", type="WEAPON_ROLE", roleSet={WeaponRole.Sniper}, required=2, timeLimit=60, phaseMin=2, rarity=2 },
+    { id="VEHICLE_1", display="Destroy 1 vehicle.", type="VEHICLE", required=1, timeLimit=90, phaseMin=2, rarity=2 },
+    { id="STEALTH_30", display="Stay crouched or hidden for 30s.", type="STEALTH", required=30, timeLimit=45, phaseMin=2, rarity=2 },
+    { id="RELOADLESS", display="Empty your mag without reloading.", type="RELOADLESS", required=1, timeLimit=25, phaseMin=2, rarity=2 },
+
+    -- Rare (phase 2-3) — starts to creep morally
+    { id="HEADS_6", display="Get 6 headshot kills.", type="HEADSHOT", required=6, timeLimit=90, phaseMin=2, rarity=3 },
+    { id="SURVIVE_60", display="Survive for 60 seconds.", type="SURVIVE", required=60, timeLimit=60, phaseMin=2, rarity=2 },
+    { id="DAMAGE_10", display="Damage 10 different enemies.", type="DAMAGE", required=10, timeLimit=100, phaseMin=2, rarity=3 },
+    { id="FIND_TERMINAL", display="Find a hidden terminal and read its log.", type="TERMINAL_READ", required=1, timeLimit=120, phaseMin=2, rarity=3 },
+    { id="REWARD_REFUSE", display="Refuse a nearby reward crate for 20s.", type="REFUSE_REWARD", required=20, timeLimit=25, phaseMin=2, rarity=3 },
+
+    -- Mid-game / uneasy (phase 3)
+    { id="NEVER_LOOK", display="Spend 45s looking away from combat.", type="LOOK_AWAY", required=45, timeLimit=60, phaseMin=3, rarity=3 },
+    { id="BARRICADE", display="Hold a point for 30s against attackers.", type="HOLD", required=30, timeLimit=45, phaseMin=3, rarity=3 },
+    { id="OBJECTIVE_IGNORE", display="Ignore the main objective for two minutes.", type="IGNORE", required=120, timeLimit=140, phaseMin=3, rarity=3 },
+    { id="BLOOD_DECAL", display="Trigger world paint in a small area (bleed effect).", type="WORLD_PAINT_TRIGGER", required=1, timeLimit=90, phaseMin=3, rarity=3 },
+    { id="ECHO_FIND", display="Hear a MemoryEcho fully.", type="ECHO", required=1, timeLimit=25, phaseMin=3, rarity=3 },
+
+    -- Dark / moral (phase 3-4)
+    { id="ABANDON_POINT", display="Leave a capture point and let it flip.", type="ABANDON", required=1, timeLimit=60, phaseMin=3, rarity=3 },
+    { id="LET_IT_DIE", display="Do not assist a downed squadmate for 30s.", type="LET_IT_DIE", required=30, timeLimit=40, phaseMin=3, rarity=3 },
+    { id="COLLECT_BLOOD_LETTER", display="Find scattered blood-letter marks (WAKE) on the map.", type="SCAVENGE", required=3, timeLimit=180, phaseMin=3, rarity=3 },
+
+    -- Unique / endgame horrors (phase 4)
+    { id="IMPOSSIBLE_KILL", display="Kill the impossible.", type="IMPOSSIBLE", required=1, timeLimit=15, phaseMin=4, rarity=4 },
+    { id="KILL_FRIEND", display="A subject named ALICE has been designated for termination. Eliminate her.", type="KILL_FRIEND", required=1, timeLimit=120, phaseMin=4, rarity=4 },
+    { id="DARK_BETRAY", display="Eliminate a squadmate.", type="KILL_TEAMMATE", required=1, timeLimit=60, phaseMin=4, rarity=4 },
+    { id="DARK_SACRIFICE", display="Sacrifice an ally near an objective.", type="KILL_TEAMMATE", required=1, timeLimit=90, phaseMin=4, rarity=4 },
+    { id="FREE_WILL", display="Die on purpose 3 times in 20s (prove you can refuse).", type="SUICIDE_TEST", required=3, timeLimit=20, phaseMin=4, rarity=4 },
+    { id="TERMINAL_DECRYPT", display="Collect 3 log fragments and decode them.", type="DECRYPT", required=3, timeLimit=240, phaseMin=4, rarity=4 },
+
+    -- Filler / variety tasks to reduce repetition
+    { id="NO_MELEE", display="Don't melee for 60s.", type="NO_MELEE", required=60, timeLimit=70, phaseMin=1, rarity=2 },
+    { id="STEALTH_KILL_1", display="Perform 1 stealth takedown.", type="STEALTH_KILL", required=1, timeLimit=40, phaseMin=2, rarity=2 },
+    { id="CAPTURE_2", display="Capture 2 points (count total).", type="CAPTURE", required=2, timeLimit=180, phaseMin=1, rarity=2 },
+    { id="HELP_SQUAD_2", display="Rescue or revive 2 teammates.", type="AID", required=2, timeLimit=180, phaseMin=1, rarity=2 },
+    { id="VEHICLE_2", display="Destroy 2 vehicles.", type="VEHICLE", required=2, timeLimit=180, phaseMin=2, rarity=3 },
+    { id="HEADS_10", display="10 headshot kills.", type="HEADSHOT", required=10, timeLimit=200, phaseMin=3, rarity=3 }
+}
+
+-- Late-game supplemental tasks (these are eligible starting at phaseMin indicated)
+local LATE_GAME_TASKS = {
+    { id="WHISPER_1_ALT", display="Survive while whispers play for 10s (alt)", type="WHISPER", required=10, timeLimit=20, phaseMin=2, rarity=2 },
+    { id="STAY_MARKER_40", display="Find the marker and hold your position for 40s.", type="STAY_MARKER", required=40, timeLimit=80, phaseMin=2, rarity=2 },
+    { id="NEUTRAL_2", display="Eliminate 2 neutral targets.", type="WEIRD_NEUTRAL", required=2, timeLimit=60, phaseMin=2, rarity=2 },
+    { id="STAND_STILL_20", display="Stand still for 20 seconds.", type="STAND_STILL", required=20, timeLimit=25, phaseMin=2, rarity=2 },
+    { id="SCAVENGE_RARE", display="Collect 5 world items (scattered).", type="SCAVENGE", required=5, timeLimit=180, phaseMin=3, rarity=3 },
+    { id="ECHO_CHAIN", display="Trigger three MemoryEcho events in one life.", type="ECHO_CHAIN", required=3, timeLimit=600, phaseMin=3, rarity=3 }
+}
+
+-- Impossible / secret tasks
+local IMPOSSIBLE_TASKS = {
+    { id="IMPOSSIBLE_KILL", display="Kill the impossible", type="IMPOSSIBLE", required=1, timeLimit=15, phaseMin=4, rarity=4 }
+}
+
+-- Dark pool (phase 3-4, morally charged tasks)
+local DARK_TASK_POOL = {
+    { id="DARK_BETRAY", display="Eliminate a squadmate.", type="KILL_TEAMMATE", required=1, timeLimit=60, phaseMin=3, rarity=4 },
+    { id="KILL_FRIEND", display="A subject named ALICE has been designated for termination. Eliminate her.", type="KILL_FRIEND", required=1, timeLimit=120, phaseMin=4, rarity=4 },
+    { id="DARK_SACRIFICE", display="Sacrifice an ally near an objective.", type="KILL_TEAMMATE", required=1, timeLimit=90, phaseMin=4, rarity=4 }
+}
+
+-- ===========================
+-- MESSAGES / LORE (phase aware)
+-- Indexed by phase: [1], [2], [3]
+-- Add / expand these lists as you like (I added several to reduce repetition)
+-- ===========================
+local MSG = {
+    SUCCESS = {
+        [1] = {
+            "Ayy good job mate, you did it!",
+            "Nice one, rookie!",
+            "Small triumph — keep moving.",
+            "Clean execution.",
+            "You made that look easy.",
+            "Tidy work.",
+            "Good hustle.",
+            "That was on target.",
+            "Keep it up, soldier.",
+            "Brief glory, then back to work."
+        },
+        [2] = {
+            "Obedience noted. Continue.",
+            "Satisfactory performance.",
+            "They like that.",
+            "Good. We are watching.",
+            "Not bad for a meat-processor.",
+            "Keep following orders.",
+            "Recorded: compliant.",
+            "Metrics rising.",
+            "This behavior is desirable.",
+            "Carry on — do not distract."
+        },
+        [3] = {
+            "They are pleased.",
+            "Compliance breeds reward.",
+            "Efficient. Useful.",
+            "Well done. The machine hums.",
+            "You progress the objective.",
+            "Keep going. Don't stop.",
+            "Useful output registered.",
+            "You did not disappoint.",
+            "Continue the rhythm.",
+            "Another notch secured."
+        },
+        [4] = {
+            "A rhythm completes.",
+            "Excellent — the cycle tightens.",
+            "We preserve another echo.",
+            "The ledger gains a line.",
+            "Your obedience makes the gears hum.",
+            "Stored: subject success.",
+            "Another sample conforms.",
+            "Completion acknowledged.",
+            "The pattern reinforces.",
+            "You answered well enough."
+        }
+    },
+
+    FAIL = {
+        [1] = {
+            "Ah tartar sauce, you failed!",
+            "Oopsie daisy — not your finest hour.",
+            "Close, try again.",
+            "No worries — practice.",
+            "That missed the mark.",
+            "Not great, honestly.",
+            "Not your day, kid.",
+            "Shake it off.",
+            "You can do better.",
+            "Retry that and stop whining."
+        },
+        [2] = {
+            "Unsatisfactory.",
+            "A lapse in performance.",
+            "Do better next time.",
+            "You slowed the unit down.",
+            "We expected more.",
+            "I will note this.",
+            "This will be recorded.",
+            "Do not repeat this error.",
+            "Subpar compliance.",
+            "Underwhelming."
+        },
+        [3] = {
+            "Failure has a price.",
+            "Response not detected. Why didn't you obey?",
+            "You will learn the cost of uselessness.",
+            "Worthless attempts accumulate.",
+            "You disappoint them.",
+            "This was inevitable.",
+            "Anomaly: poor output.",
+            "Punishment protocols escalate.",
+            "You are becoming costly.",
+            "Remedial measures advised."
+        },
+        [4] = {
+            "Reset scheduled for deviation.",
+            "Deviation intolerable. Record it.",
+            "You did not meet the pattern.",
+            "Correction will be administered.",
+            "Failure is tallied.",
+            "This will not be permitted again.",
+            "Subject unfit: mark accordingly.",
+            "The machine grows impatient.",
+            "Do not fail again.",
+            "Your statistic has worsened."
+        }
+    },
+
+    SKIP = {
+        [1] = {
+            "Skipping? Fine.",
+            "You ducked it.",
+            "Noted. Move on.",
+            "Huh. Okay.",
+            "That one was optional, kind of.",
+            "You take the easy way out.",
+            "We logged the avoidance.",
+            "Convenient, isn't it?",
+            "Skipping recorded.",
+            "No prize for shortcuts."
+        },
+        [2] = {
+            "Skipping is a sign of weakness.",
+            "You cannot run from your purpose.",
+            "We will remember this.",
+            "Cowardice costs you later.",
+            "Avoidance recorded.",
+            "Such little resolve.",
+            "Your resolve is thin.",
+            "Noted in the ledger.",
+            "Avoidance reduced your score.",
+            "This will complicate things."
+        },
+        [3] = {
+            "Every skip stains you deeper.",
+            "Pathetic. We will remember.",
+            "Defiance will be corrected.",
+            "You choose wrong.",
+            "The ledger grows.",
+            "You cut your own throat.",
+            "The machine does not forget.",
+            "Consequences accrue.",
+            "Skipping increases the tally.",
+            "Your name darkens in the log."
+        },
+        [4] = {
+            "The pattern punishes shirking.",
+            "Avoidance will be corrected permanently.",
+            "You are marked for neglect.",
+            "Refusal ripples outward.",
+            "We do not tolerate gaps.",
+            "Skipping culminates in loss.",
+            "The ledger demands payment.",
+            "There is no neutral skipping.",
+            "The system files a strike.",
+            "You are closer to termination."
+        }
+    },
+
+    O_RESP = {
+        "here u go",
+        "u sure are a slow reader",
+        "are u serious?",
+        "you keep pressing this, why",
+        "we note you",
+        "stop it or we stop you",
+        "this key does not grant mercy",
+        "do not fetishize the console",
+        "annoyance: incremental",
+        "do you need attention?"
+    },
+
+    GLITCH = {
+        [1] = {
+            "Th#y #r# wat#ching",
+            "[####REDACTED####]",
+            "system hiccup.",
+            "t1m3 syn#op$e",
+            "smudge on line three"
+        },
+        [2] = {
+            "SYSTEM BREACH: ██-██",
+            "Signal noise... voices.",
+            "data drift.",
+            "intermittent mirror",
+            "link unstable"
+        },
+        [3] = {
+            "[DATA CORRUPT]",
+            "——— // /// ///",
+            "███ ████",
+            "SEGMENT LOST",
+            "OUTPUT: ████"
+        },
+        [4] = {
+            "01010100 01100001 01101011 01100101 00100000 01101101 01100101",
+            "WAKE✗UP — translate: WAKE UP",
+            "ERROR: memory leak -> identity",
+            "REPLICANT SIGNAL: FLICKER",
+            "DO NOT TRUST: EXTERNAL"
+        }
+    },
+
+    LORE = {
+        "Found log: '—it hums in the silent places.'",
+        "Note: 'Do not answer the knock that isn't there.'",
+        "Scrap: 'We made a promise to eat the clock.'",
+        "Fragment: 'Orders arrived via a voice with no mouth.'",
+        "Found: 'They count the seconds like teeth.'",
+        "Log: 'We stopped naming things. They named us instead.'",
+        "Archive: 'Names were softer than we expected.'",
+        "Tally: 'Subject responded at t + 94s.'",
+        "Report: 'Noise increased after compliance.'",
+        "Excerpt: 'We taught them rhythm, then listened.'"
+    },
+
+    GHOST_WARN = {
+        "[ALICE]: If you're hearing this, don't press P.",
+        "[JON]: They put names on us. Burn yours.",
+        "[MARA]: WAKE—",
+        "[KAZIM]: It wasn't a game.",
+        "[LUCY]: I wrote my name in blood. If you see it, run.",
+        "[ERIC]: They called it a reward. It was a trap.",
+        "[NOAH]: We were taught to obey; do not follow.",
+        "[SARA]: The crate is not a kindness.",
+        "[TOM]: Listen for the clicks. They count each one.",
+        "[MAYA]: If you leave, they notice the gap."
+    },
+
+    TERMINAL = {
+        "LOG: 431b-Delta — They brought us in at night. They told us to 'play'.",
+        "ENTRY: 07 — I scratched my ID into the table. It bled. My name is ALICE.",
+        "ARCHIVE: Files were labeled SUBJECT-003. The headset hummed until I forgot my face.",
+        "CONSOLE: 'Calibration complete. Begin sequence.'",
+        "NOTE: 'Do not trust messages with the tag [SYSTEM].'",
+        "REPORT: 'Subject refused at t+210 — corrective scheduled.'",
+        "DEBRIEF: 'We feed them tasks; tasks make them move.'",
+        "RECORD: 'If this reads, know we tried.'",
+        "MEMO: 'We hid names inside walls. They will find them.'",
+        "FILE: 'The door made no sound, but the locks learned to sing.'"
+    },
+
+    ERROR = {
+        "[AUTH] ACCESS: DENIED",
+        "[SYS] THREAD FAILED",
+        "RESPONSE CODE: 0x0D",
+        "SEGMENTATION: 0xDEAD",
+        "WATCHER OFFLINE — reconnection pending",
+        "INVALID SUBJECT ID",
+        "SANITY CHECK: FAILED",
+        "MEMORY COLLISION DETECTED",
+        "QUEUE OVERFLOW — trimming records",
+        "ARCHIVE CORRUPTED: PARTIAL"
+    },
+
+    SECRET = {
+        "WAKE UP",
+        "NO P",
+        "WE WERE HERE",
+        "THEY COUNT",
+        "NAME ON WALL",
+        "DO NOT OBEY",
+        "FIND ALICE",
+        "BURN THE LIST",
+        "THE CONTRACT TAKES",
+        "REMEMBER"
+    },
+
+    POSTMATCH = {
+        "Subject lasted longer than predicted.",
+        "They learn the rhythm. They count the beats for us.",
+        "Do you think they felt anything? That flicker of hope?",
+        "Hope is useful. It keeps them moving. We fed them tasks.",
+        "Their name was %s, wasn't it?", -- format with player name
+        "Names are soft. We prefer rhythms.",
+        "Keep the record. Save the echo. There will be another.",
+        "Always another. Always the clock.",
+        "We archive persistence. Persistence predicts behavior.",
+        "Another subject will replace the gap."
+    },
+
+    TEAMKILL_WARN = {
+        [1] = {"Careful—friendly fire detected.", "Watch that shot.", "Friendly fire: caution."},
+        [2] = {"Teamkill recorded: be cautious.", "You're stepping out of line.", "This will be noted."},
+        [3] = {"Traitorous strike recorded.", "This will not be tolerated.", "Your name is darker now."},
+        [4] = {"Traitor flagged: purge on file.", "Betrayal escalated — consequences pending.", "You have crossed the ledger."}
+    },
+
+    TEAMKILL_BAD = {
+        [1] = {"Teamkiller. Consequences follow.", "Unfortunate lapse."},
+        [2] = {"We do not like traitors.", "Punishment queued."},
+        [3] = {"Your hands stain the ledger.", "Trace recorded."},
+        [4] = {"Flagged for termination.", "Traitor: dossier opened.", "Subject expelled from registry."}
+    },
+
+    -- optional: small utility bank for human-style taunts / debug (keeps flavor)
+    UTILITY = {
+        "DEBUG: ping",
+        "SCHEDULER: OK",
+        "STORAGE: low",
+        "ALERT: irregularity",
+        "NOTICE: rhythm fluctuation"
+    }
+}
+
+-- ===========================
+-- Safety utilities
+-- ===========================
+local function pick(t)
+    if not t or type(t) ~= "table" or #t == 0 then return "" end
+    local idx = Random.RangeInteger(1, #t)
+    return t[idx] or ""
+end
+local function clamp(v,a,b) if v<a then return a elseif v>b then return b end return v end
+local function safeLog(s) if not DEBUG.LOGGING_ENABLED then return end pcall(function() print("[TheAnomaly] "..tostring(s)) end) end
+local function shallowcopy(t) if not t then return nil end local c = {} for k,v in pairs(t) do c[k]=v end return c end
+
+-- ===========================
+-- EVENT POOLS
+-- ===========================
+local EVENT_POOLS = {
+    [1] = {"GLITCH"},
+    [2] = {"GLITCH","PHANTOM","FREEZE","CROSSHAIR"},
+    [3] = {"GLITCH","PHANTOM","FREEZE","BLACKOUT","HIDE","NAME_STEAL","CHAT","BETRAYAL","OBSERVER","RISE_WATER","WORLD_PAINT","FALSE_HOPE","MemoryEcho"},
+    [4] = {"BLACKOUT","HIDE","NAME_STEAL","BETRAYAL","WORLD_PAINT","FALSE_HOPE","MemoryEcho","SubjectFollower"}
+}
+
+-- ===========================
+-- TIMELINE (final pacing & content)
+-- ===========================
+local TIMELINE_EVENTS = {
+    { time = 480,  action = "LORE_DROP",    value = "Found log: '—it hums in the silent places.'"}, -- 8m
+    { time = 540,  action = "PHASE_MESSAGE", value = "<color=#FFAA66>Anomaly unrest detected.</color>"}, -- 9m
+    { time = 900,  action = "UNLOCK_EVENT", value = "PHANTOM", message = "You feel a chill... as if the air itself is watching."}, -- 15m
+    { time = 1200, action = "LORE_DROP",    value = "Scrap: 'We made a promise to eat the clock.'"}, -- 20m
+    { time = 1500, action = "PHASE_MESSAGE", value = "<color=#FF6666>Containment failing.</color>"}, -- 25m
+    { time = 1800, action = "UNLOCK_EVENT", value = "HIDE", message = "Reality matrix destabilizing."}, -- 30m
+    { time = 2100, action = "UNLOCK_EVENT", value = "FALSE_HOPE", message = "A kindness... or a test?"}, -- 35m
+    { time = 2400, action = "UNLOCK_EVENT", value = "WORLD_PAINT", message = "The earth stains itself."}, -- 40m
+    { time = 3000, action = "DIALOGUE",     pose = "Unknown", name = "???", text = "You weren't supposed to see this. None of this is real." } -- 50m
+}
+
+TheAnomaly_ExcessiveEdition.TIMELINE_EVENTS = TIMELINE_EVENTS
+
+-- ===========================
+-- Scheduler
+-- ===========================
+function TheAnomaly_ExcessiveEdition:Schedule(methodName, delay, args)
+    self.scheduled = self.scheduled or {}
+    local due = (Time.timeSinceLevelLoad or 0) + (delay or 0)
+    table.insert(self.scheduled, {time=due, method=methodName, args=args or {}})
+    if #self.scheduled > CFG.MAX_SCHEDULED then table.remove(self.scheduled, 1) end
+end
+
+function TheAnomaly_ExcessiveEdition:ProcessSchedule()
+    if not self.scheduled then return end
+    local now = Time.timeSinceLevelLoad or 0
+    for i=#self.scheduled,1,-1 do
+        local e = self.scheduled[i]
+        if e and e.time <= now then
+            table.remove(self.scheduled, i)
+            local fn = self[e.method]
+            if type(fn) == "function" then
+                local ok,err = pcall(fn, self, unpack(e.args or {}))
+                if not ok then safeLog("Scheduled error: "..tostring(err)) end
+            end
+        end
+    end
+end
+
+-- ===========================
+-- Start / Init
+-- ===========================
+function TheAnomaly_ExcessiveEdition:Start()
+    if self.isInitialized then return end
+    self.lastShownMessage = self.lastShownMessage or ""
+    self.karma = self.karma or 0 -- initialize karma (preserve saved value if present)
+    self.isInitialized = true
+    self.sanity = 100.0
+    self.currentTask = nil
+    self.nextTaskTime = (Time.timeSinceLevelLoad or 0) + CFG.STARTUP_GRACE
+    self.buffEndTime = 0
+    self.isBuffActive = false
+    self._origSpeedMul = nil
+    self.completedTasks = 0
+    self.playTime = 0
+    self.phase = 1
+    self.skipsThisLife = 0
+    self.totalSkips = 0
+    self.oPresses = 0
+    self.eventCooldowns = {}
+    self.scheduled = {}
+    self.damageTracker = {}
+    self.ephemerals = {}
+    self.holdMessageUntil = 0
+    self.teamkills = 0
+    self.teamkillCooldown = 0
+    self.soundBank = nil
+    self.priorityMessage = ""
+    self.priorityMessageEndTime = 0
+    self.nameRestoreMap = {}
+    self.unlockedEvents = self.unlockedEvents or {}
+    self.karma = 0
+    -- Clue / Ghost system
+self.cluesFound = self.cluesFound or 0
+self.clueLogSeen = self.clueLogSeen or {}
+self.previousSubjects = self.previousSubjects or {"ALICE", "JON", "MARA", "KAZIM"}
+self.ghostMessages = self.ghostMessages or {
+    ["ALICE_1"] = "If you are alive... don't press O again.",
+    ["JON_1"]   = "They call it play. It is not.",
+    ["MARA_1"]  = "I scratched my name into metal. It bled.",
+    ["KAZIM_1"] = "WAKE UP. They are watching you read this."
+}
+
+
+    self:TryLoadSoundBank()
+
+    pcall(function() if GameEvents and GameEvents.onActorDiedInfo then GameEvents.onActorDiedInfo:AddListener(self, "OnActorDiedInfo") end end)
+    pcall(function() if GameEvents and GameEvents.onCapturePointCaptured then GameEvents.onCapturePointCaptured:AddListener(self, "OnCapturePointCaptured") end end)
+    pcall(function() if GameEvents and GameEvents.onVehicleDestroyed then GameEvents.onVehicleDestroyed:AddListener(self, "OnVehicleDestroyed") end end)
+    pcall(function() if GameEvents and GameEvents.onActorSpawn then GameEvents.onActorSpawn:AddListener(self, "OnActorSpawned") end end)
+    pcall(function() if GameEvents and GameEvents.onPlayerDealtDamage then GameEvents.onPlayerDealtDamage:AddListener(self, "OnPlayerDealtDamage") end end)
+    pcall(function() if GameEvents and GameEvents.onMatchEnd then GameEvents.onMatchEnd:AddListener(self, "OnMatchEnd") end end)
+
+    self:SetPriorityMessage("<color=#AADDFF>Contract system online — booting...</color>", CFG.STARTUP_GRACE)
+    safeLog("Anomaly started. Next task in "..tostring(CFG.STARTUP_GRACE).."s")
+
+    -- initial lore drops
+    self:Schedule("OverlayOnce", 300, {pick(MSG.LORE), 6.0})
+    self:Schedule("OverlayOnce", 900, {pick(MSG.LORE), 6.0})
+    self:Schedule("ProcessTimeline", 5, {})
+end
+
+function TheAnomaly_ExcessiveEdition:TryLoadSoundBank()
+    pcall(function()
+        if Resources and Resources.Load then
+            local sb = Resources.Load("TaskSoundBank")
+            if sb and sb.gameObject then self.soundBank = sb; safeLog("TaskSoundBank loaded.") end
+        end
+    end)
+end
+
+function TheAnomaly_ExcessiveEdition:SafePlaySFX(clipName)
+    if self.soundBank and self.soundBank.PlayRandom then pcall(function() self.soundBank:PlayRandom() end); return end
+    pcall(function()
+        if Resources and Resources.Load and Player and Player.actor and Player.actor.gameObject then
+            local clip = Resources.Load(clipName)
+            if clip then
+                local src = Player.actor.gameObject:GetComponent("AudioSource")
+                if not src then src = Player.actor.gameObject:AddComponent("AudioSource") end
+                src.clip = clip
+                src:Play()
+            end
+        end
+    end)
+end
+
+-- ===========================
+-- UI helpers
+-- ===========================
+function TheAnomaly_ExcessiveEdition:SetPriorityMessage(text, duration)
+    self.priorityMessage = tostring(text or "")
+    self.priorityMessageEndTime = (Time.timeSinceLevelLoad or 0) + (duration or 2.0)
+end
+
+function TheAnomaly_ExcessiveEdition:OverlayOnce(text, dur)
+    self:SetPriorityMessage(text, dur or 1.6)
+end
+
+-- ===========================
+-- Player helper
+-- ===========================
+function TheAnomaly_ExcessiveEdition:GetPlayerActor()
+    if Player and Player.actor then return Player.actor end
+    return nil
+end
+
+function TheAnomaly_ExcessiveEdition:SafeSetPlayerHealth(pl, newHealth)
+    pcall(function()
+        if not pl then return end
+        if type(pl.health) == "number" then pl.health = math.max(0, math.min((pl.maxHealth or pl.health), newHealth)) end
+    end)
+end
+
+function TheAnomaly_ExcessiveEdition:SafeKillPlayer(pl)
+    pcall(function() if pl and pl.Kill then pl:Kill(pl) end end)
+end
+
+function TheAnomaly_ExcessiveEdition:GrantClue(id)
+    if not id then return end
+    if not self.clueLogSeen then self.clueLogSeen = {} end
+    if self.clueLogSeen[id] then return end
+    self.clueLogSeen[id] = true
+    self.cluesFound = (self.cluesFound or 0) + 1
+    self:SetPriorityMessage("<color=#FFAA66>LOG FRAGMENT RECOVERED</color>", 2.2)
+    pcall(function() if self.soundBank and self.soundBank.PlayRandom then self.soundBank:PlayRandom() end end) -- fallback if ClueFound missing
+    safeLog("Clue found: "..tostring(id).." | Total clues: "..tostring(self.cluesFound))
+end
+
+-- ===========================
+-- Update loop (fixed)
+-- ===========================
+function TheAnomaly_ExcessiveEdition:Update(dt)
+    if not self.isInitialized then self:Start(); return end
+    dt = dt or (Time.deltaTime or 0.016)
+    local now = Time.timeSinceLevelLoad or 0
+    self.playTime = (self.playTime or 0) + dt
+
+    self:ProcessSchedule()
+
+    -- sanity decay
+    self.sanity = clamp((self.sanity or 100) - (CFG.SANITY_DECAY_PER_SEC * dt), 0, 100)
+
+    -- buff management
+    self:HandleBuffState()
+
+    -- process input (defensive)
+    pcall(function()
+        if Input.GetKeyDown then
+            if Input.GetKeyDown(KeyCode.O) or Input.GetKeyDown("o") then self:HandleOKey() end
+            if Input.GetKeyDown(KeyCode.P) or Input.GetKeyDown("p") then self:HandlePKey() end
+            if Input.GetKeyDown(KeyCode.L) or Input.GetKeyDown("l") then self:HandleLKey() end
+        end
+    end)
+
+    -- scheduled periodic tasks
+    if self.currentTask then
+        self.currentTask.timeLeft = (self.currentTask.timeLeft or (self.currentTask.timeLimit or 60)) - dt
+
+        -- tickers for timed tasks
+        if self.currentTask.type == "SURVIVE" or self.currentTask.type == "WHISPER" then self:TickSurvive(dt) end
+        if self.currentTask.type == "NO_FIRE" then self:TickNoFire(dt) end
+        if self.currentTask.type == "STAND_STILL" or self.currentTask.type == "STILL" then self:TickStandStill(dt) end
+
+        -- update timer UI throttle (keeps flicker low)
+        self._tick = (self._tick or 0) + dt
+        if self._tick >= CFG.TIMER_TICK then
+            self._tick = self._tick - CFG.TIMER_TICK
+            -- (optional) could call UpdateTaskUI_TimerOnly here if you had it - but DrawHUD handles display
+        end
+
+        if (self.currentTask.timeLeft or 0) <= 0 then
+            self:FailCurrentTask("timeout")
+        end
+    else
+        if now >= (self.nextTaskTime or 0) and now >= (self.holdMessageUntil or 0) then
+            self:AssignNewTask()
+        end
+    end
+
+    -- UI refresh throttle
+    self._uiTimer = (self._uiTimer or 0) - dt
+    if self._uiTimer <= 0 then
+        self._uiTimer = CFG.UI_REFRESH
+        self:DrawHUD()
+    end
+
+    -- phase advancement
+    if self.phase == 1 and ((self.completedTasks or 0) >= CFG.PHASE2_TASKS or self.playTime >= CFG.PHASE2_TIME) then
+        self:EnterPhase(2)
+    end
+    if self.phase == 2 and ((self.completedTasks or 0) >= CFG.PHASE3_TASKS or self.playTime >= CFG.PHASE3_TIME) then
+        self:EnterPhase(3)
+    end
+
+    if self.currentTask and self.currentTask.type == "STAY_MARKER" then self:TickStayMarker(dt) end
+
+    if self.phase < 4 and self.playTime >= (CFG.PHASE4_TIME or 1800) then
+    self:EnterPhase(4)
+end
+
+
+    -- ephemeral cleanup (robust: deactivate + destroy gameObject)
+    for i=#(self.ephemerals or {}),1,-1 do
+        local e = self.ephemerals[i]
+        if e and e.expire and now >= e.expire then
+            if e.actor then
+                pcall(function() if e.actor.Deactivate then e.actor:Deactivate() end end)
+                pcall(function() if e.actor.gameObject then GameObject.Destroy(e.actor.gameObject) end end)
+            end
+            table.remove(self.ephemerals, i)
+        end
+    end
+end
+
+function TheAnomaly_ExcessiveEdition:TickStayMarker(dt)
+    if not self.currentTask or self.currentTask.type ~= "STAY_MARKER" then return end
+    local pl = self:GetPlayerActor()
+    if not pl or not self.currentTask.marker then self:FailCurrentTask("marker_lost"); return end
+    local distance = 100.0
+    pcall(function() distance = (pl.position - self.currentTask.marker.transform.position).magnitude end)
+    if distance < 5.0 then self.currentTask.stillAccum = (self.currentTask.stillAccum or 0) + dt else self.currentTask.stillAccum = 0 end
+    self.currentTask.progress = math.floor(self.currentTask.stillAccum)
+    if self.currentTask.progress >= (self.currentTask.required or 1) then self:CompleteCurrentTask() end
+end
+
+
+-- ===========================
+-- Input handlers
+-- ===========================
+function TheAnomaly_ExcessiveEdition:HandleOKey()
+    self.oPresses = (self.oPresses or 0) + 1
+    local idx = clamp(self.oPresses, 1, #MSG.O_RESP)
+    local resp = MSG.O_RESP[idx] or pick(MSG.O_RESP) or "..."
+    if self.currentTask then
+        self:SetPriorityMessage(string.format("<size=20><b><color=#FFBB33>CONTRACT:</color></b>\n%s</size>", tostring(self.currentTask.display or "")), 4.2)
+    else
+        self:SetPriorityMessage(resp, 2.6)
+    end
+    if (self.oPresses or 0) >= CFG.MAX_O_PRESS then
+        local pl = self:GetPlayerActor()
+        if pl then self:SafeKillPlayer(pl) end
+        self:SetPriorityMessage("<color=#FF4444>TOO MUCH.</color>", 2.4)
+    end
+end
+
+function TheAnomaly_ExcessiveEdition:HandlePKey()
+    if not self.currentTask then self:SetPriorityMessage("<color=#FFFF88>No task to skip.</color>", 1.4); return end
+    self.totalSkips = (self.totalSkips or 0) + 1
+    self.skipsThisLife = (self.skipsThisLife or 0) + 1
+    local phaseIdx = self.phase or 1
+    local bank = (MSG.SKIP and MSG.SKIP[phaseIdx]) or MSG.SKIP[1]
+    self:SetPriorityMessage(pick(bank), 3.2)
+
+    local pl = self:GetPlayerActor()
+    if pl and type(pl.health) == "number" then
+        local dmg = (self.skipsThisLife >= CFG.SKIP_PER_LIFE_PENALTY) and CFG.SKIP_MAJOR_HIT or CFG.SKIP_MINOR_HIT
+        self:SafeSetPlayerHealth(pl, math.max(1, (pl.health or (pl.maxHealth or 100)) - dmg))
+    end
+
+    if pl and pl.weaponSlots then
+        for i,w in ipairs(pl.weaponSlots) do
+            if w and type(w.spareAmmo) == "number" and type(w.maxAmmo) == "number" then
+                w.spareAmmo = math.max(0, math.floor(w.spareAmmo * (1 - CFG.SKIP_AMMO_RATIO)))
+            end
+        end
+    end
+
+    if self.skipsThisLife >= CFG.SKIP_PER_LIFE_PENALTY then
+        if pl and type(pl.health) == "number" then self:SafeSetPlayerHealth(pl, 1) end
+        self:SetPriorityMessage("<color=#FF3333>Severe punishment: vitality stripped.</color>", 3.6)
+    end
+
+    self.karma = (self.karma or 0) - 2
+    self.currentTask = nil
+    self.nextTaskTime = (Time.timeSinceLevelLoad or 0) + CFG.TASK_COOLDOWN
+    self.holdMessageUntil = (Time.timeSinceLevelLoad or 0) + 1.8
+end
+
+function TheAnomaly_ExcessiveEdition:HandleLKey()
+    if not DEBUG.TIMESKIP_ENABLED then return end
+    self.playTime = (self.playTime or 0) + (30 * 60)
+    self:SetPriorityMessage("<color=#FFAA66>Time advanced (30m)</color>", 2.0)
+    if self.phase == 1 and self.playTime >= CFG.PHASE2_TIME then self:EnterPhase(2) end
+    if self.phase == 2 and self.playTime >= CFG.PHASE3_TIME then self:EnterPhase(3) end
+end
+
+-- ===========================
+-- Tasks assign/complete/fail
+-- ===========================
+function TheAnomaly_ExcessiveEdition:AssignNewTask()
+    if (self.sanity or 100) <= 20 and Random.RangeInteger(1,8) == 1 then
+        self:SetPriorityMessage(pick(MSG.LORE), 4.0)
+        self.nextTaskTime = (Time.timeSinceLevelLoad or 0) + 6.0
+        return
+    end
+
+    local tries = 0
+    local proto = nil
+    
+    local potentialPools = {TASK_POOL}
+    if LATE_GAME_TASKS then table.insert(potentialPools, LATE_GAME_TASKS) end
+    if self.phase >= 3 and (self.sanity or 100) < 30 and DARK_TASK_POOL then
+        table.insert(potentialPools, DARK_TASK_POOL)
+    end
+
+    repeat
+        local chosenPool = potentialPools[Random.RangeInteger(1, #potentialPools)]
+        proto = chosenPool[Random.RangeInteger(1, #chosenPool)]
+        tries = tries + 1
+    until (not self.lastTaskId) or (proto and proto.id ~= self.lastTaskId) or tries > 15
+
+    if not proto then
+        safeLog("AssignNewTask: Failed to find a suitable new task.")
+        self.nextTaskTime = (Time.timeSinceLevelLoad or 0) + CFG.TASK_COOLDOWN
+        return
+    end
+
+    local t = shallowcopy(proto)
+    t.progress = 0
+    t.timeLeft = t.timeLimit or 60
+    self.betrayalIsSanctioned = false
+
+    if t.type == "SURVIVE" or t.type == "WHISPER" then t.surviveAccum = 0 end
+    if t.type == "NO_FIRE" then t.noFireAccum = 0 end
+    if t.type == "DAMAGE" then self.damageTracker = {} end
+    if t.type == "STAND_STILL" then t.stillAccum = 0 end
+    if t.type == "STAY_MARKER" then
+        t.stillAccum = 0
+        local ok, marker = pcall(function() return GameObject.Find and GameObject.Find("AnomalyMarker") end)
+        if ok and marker and marker.transform then t.marker = marker else
+            -- cannot find marker: fail gracefully
+            self:SetPriorityMessage("<color=#FF4444>Marker missing — contract void.</color>", 2.4)
+            self.nextTaskTime = (Time.timeSinceLevelLoad or 0) + CFG.TASK_COOLDOWN
+            return
+        end
+    end
+    if t.type == "KILL_FRIEND" then
+        self:SpawnFriendlyTarget("ALICE")
+        self.betrayalIsSanctioned = true
+    end
+    if t.type == "KILL_TEAMMATE" then
+        self.betrayalIsSanctioned = true
+    end
+
+    self.currentTask = t
+    self.lastTaskId = t.id
+    self.nextTaskTime = (Time.timeSinceLevelLoad or 0) + CFG.TASK_COOLDOWN
+    self:SetPriorityMessage(string.format("<size=36><b><color=#FFAA00>NEW CONTRACT</color></b>\n%s</size>", tostring(t.display)), 3.8)
+    self:Schedule("SmallTaskPopup", 0.9, {t.id})
+end
+
+function TheAnomaly_ExcessiveEdition:SmallTaskPopup(taskId)
+    if not self.currentTask or self.currentTask.id ~= taskId then return end
+    self:SetPriorityMessage(string.format("<size=22><b><color=#FFA500>CONTRACT:</color></b>\n%s</size>", tostring(self.currentTask.display)), 6.0)
+end
+
+function TheAnomaly_ExcessiveEdition:CompleteCurrentTask()
+    if not self.currentTask then return end
+    self.completedTasks = (self.completedTasks or 0) + 1
+
+    local phaseIdx = self.phase or 1
+    local bank = MSG.SUCCESS[phaseIdx] or MSG.SUCCESS[1]
+    local message = pick(bank)
+
+    -- optional karma-high override (define MSG.SUCCESS_HIGH_KARMA if you want)
+    if (self.karma or 0) >= 10 and MSG.SUCCESS_HIGH_KARMA and MSG.SUCCESS_HIGH_KARMA[phaseIdx] then
+        message = pick(MSG.SUCCESS_HIGH_KARMA[phaseIdx]) or message
+    end
+
+    self:SetPriorityMessage(message, 3.4)
+    self:SafePlaySFX("TaskComplete")
+
+    local pl = self:GetPlayerActor()
+    if pl then
+        if (self.sanity or 100) < 25 and Random.RangeInteger(1,5) == 1 then
+            if type(pl.health) == "number" then
+                self:SafeSetPlayerHealth(pl, math.max(1, (pl.health or pl.maxHealth) - 20))
+            end
+            self:SetPriorityMessage("<color=#FF6666>+40 HEALTH (CORRUPTED)</color>", 2.4)
+        else
+            if type(pl.health) == "number" and type(pl.maxHealth) == "number" then
+                self:SafeSetPlayerHealth(pl, math.min(pl.maxHealth, (pl.health or pl.maxHealth) + 20))
+            end
+            if Random.RangeInteger(1,4) == 1 then
+                self._origSpeedMul = self._origSpeedMul == nil and (pl.speedMultiplier or 1.0) or self._origSpeedMul
+                self.buffEndTime = (Time.timeSinceLevelLoad or 0) + CFG.BUFF_DURATION
+                self:SetPriorityMessage("<color=#66FFAA>SPEED SURGE!</color>", 2.4)
+                self:SafePlaySFX("TaskBuff")
+            end
+        end
+        -- karma reward for success
+        self.karma = (self.karma or 0) + 1
+    else
+        safeLog("CompleteCurrentTask: no player present")
+    end
+
+    self.currentTask = nil
+    self.nextTaskTime = (Time.timeSinceLevelLoad or 0) + CFG.TASK_COOLDOWN
+    self.holdMessageUntil = (Time.timeSinceLevelLoad or 0) + 2.6
+end
+
+function TheAnomaly_ExcessiveEdition:FailCurrentTask(reason)
+    if not self.currentTask then return end
+    local phaseIdx = self.phase or 1
+    local bank = MSG.FAIL[phaseIdx] or MSG.FAIL[1]
+    local message = pick(bank)
+
+    if (self.karma or 0) <= -8 and MSG.FAIL_LOW_KARMA and MSG.FAIL_LOW_KARMA[phaseIdx] then
+        message = pick(MSG.FAIL_LOW_KARMA[phaseIdx]) or message
+    end
+
+    self:SetPriorityMessage(message, 3.6)
+    self:SafePlaySFX("TaskFail")
+    self.sanity = math.max(0, (self.sanity or 100) - 8.0)
+
+    -- harsher karma penalty for fails
+    self.karma = (self.karma or 0) - 2
+
+    self.currentTask = nil
+    self.nextTaskTime = (Time.timeSinceLevelLoad or 0) + CFG.TASK_COOLDOWN
+    self.holdMessageUntil = (Time.timeSinceLevelLoad or 0) + 2.4
+end
+
+
+-- ===========================
+-- Tickers
+-- ===========================
+function TheAnomaly_ExcessiveEdition:TickSurvive(dt)
+    if not self.currentTask or (self.currentTask.type ~= "SURVIVE" and self.currentTask.type ~= "WHISPER") then return end
+    local pl = self:GetPlayerActor()
+    if not pl or pl.isDead then self.currentTask.surviveAccum = 0; self.currentTask.progress = 0; return end
+    self.currentTask.surviveAccum = (self.currentTask.surviveAccum or 0) + dt
+    local prog = math.floor(self.currentTask.surviveAccum + 0.001)
+    self.currentTask.progress = prog
+    if prog >= (self.currentTask.required or 1) then self:CompleteCurrentTask() end
+end
+
+function TheAnomaly_ExcessiveEdition:TickNoFire(dt)
+    if not self.currentTask or self.currentTask.type ~= "NO_FIRE" then return end
+    self.currentTask.noFireAccum = (self.currentTask.noFireAccum or 0) + dt
+    local prog = math.floor(self.currentTask.noFireAccum + 0.001)
+    self.currentTask.progress = prog
+    if prog >= (self.currentTask.required or 1) then self:CompleteCurrentTask() end
+end
+
+function TheAnomaly_ExcessiveEdition:TickStandStill(dt)
+    if not self.currentTask or self.currentTask.type ~= "STAND_STILL" then return end
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+    local vmag = 0
+    pcall(function() if pl.velocity then vmag = pl.velocity.magnitude or 0 end end)
+    if vmag < 0.3 then self.currentTask.stillAccum = (self.currentTask.stillAccum or 0) + dt else self.currentTask.stillAccum = 0 end
+    local prog = math.floor(self.currentTask.stillAccum + 0.001)
+    self.currentTask.progress = prog
+    if prog >= (self.currentTask.required or 1) then self:CompleteCurrentTask() end
+end
+
+function TheAnomaly_ExcessiveEdition:PlayerFired()
+    if not self.currentTask then return end
+    if self.currentTask.type == "NO_FIRE" then self.currentTask.noFireAccum = 0; self.currentTask.progress = 0 end
+end
+
+-- ===========================
+-- Kill / damage handling
+-- ===========================
+function TheAnomaly_ExcessiveEdition:OnActorDiedInfo(deadActor, damageInfo, isSilentKill)
+    if not damageInfo then return end
+    local pl = self:GetPlayerActor()
+    if damageInfo.sourceActor == pl and deadActor and deadActor.team == (pl and pl.team) then
+        local now = Time.timeSinceLevelLoad or 0
+        if now >= (self.teamkillCooldown or 0) then
+            self.teamkills = (self.teamkills or 0) + 1
+            if (self.teamkills or 0) == 1 then
+                self:SetPriorityMessage(pick(MSG.TEAMKILL_WARN), 3.0)
+                self.teamkillCooldown = now + 6.0
+            else
+                self:SetPriorityMessage(pick(MSG.TEAMKILL_BAD), 3.6)
+                self.sanity = math.max(0, (self.sanity or 100) - 6.0)
+                self.teamkillCooldown = now + 12.0
+                if (self.teamkills or 0) >= 3 and PlayerCamera and PlayerCamera.ApplyScreenshake then PlayerCamera.ApplyScreenshake(3, 8) end
+            end
+        end
+    end
+    self:ProcessKillProgress(deadActor, damageInfo, isSilentKill)
+end
+
+function TheAnomaly_ExcessiveEdition:ProcessKillProgress(deadActor, damageInfo, isSilentKill)
+    if not self.currentTask or isSilentKill then return end
+    local pl = self:GetPlayerActor()
+    if not pl or not damageInfo or damageInfo.sourceActor ~= pl then return end
+
+    local t = self.currentTask
+    if t.type == "KILL_TEAMMATE" or t.type == "KILL_FRIEND" then
+        if deadActor and (deadActor.team == pl.team or deadActor.name == "ALICE") then
+            t.progress = (t.progress or 0) + 1
+            if t.progress >= (t.required or 1) then self:CompleteCurrentTask() end
+        end
+        return
+    end
+
+    if deadActor and deadActor.team == pl.team then return end
+
+    if t.type == "WEAPON_ROLE" then
+        if self:DamageMatchesRole(damageInfo, t.roleSet) then
+            t.progress = (t.progress or 0) + 1
+            if t.progress >= (t.required or 1) then self:CompleteCurrentTask() end
+        end
+    elseif t.type == "HEADSHOT" then
+        if damageInfo.isCriticalHit then
+            t.progress = (t.progress or 0) + 1
+            if t.progress >= (t.required or 1) then self:CompleteCurrentTask() end
+        end
+    elseif t.type == "WEIRD_NEUTRAL" then
+        if deadActor and deadActor.team == Team.Neutral then
+            t.progress = (t.progress or 0) + 1
+            if t.progress >= (t.required or 1) then self:CompleteCurrentTask() end
+        end
+    end
+end
+
+-- robust weapon-role check with safer nil guards
+function TheAnomaly_ExcessiveEdition:DamageMatchesRole(damageInfo, roleSet)
+    if not damageInfo then return false end
+    local roles = {}
+    if type(roleSet) == "table" then roles = roleSet else roles = {roleSet} end
+
+    local entryType, slot, nameLower = nil, nil, ""
+
+    if damageInfo.sourceWeaponEntry then
+        pcall(function()
+            entryType = damageInfo.sourceWeaponEntry.type
+            slot = damageInfo.sourceWeaponEntry.slot
+            if damageInfo.sourceWeaponEntry.name then nameLower = tostring(damageInfo.sourceWeaponEntry.name):lower() end
+        end)
+    end
+
+    -- SAFE: ensure sourceWeapon exists before digging
+    if not entryType and damageInfo.sourceWeapon and damageInfo.sourceWeapon.weaponEntry then
+        pcall(function()
+            entryType = damageInfo.sourceWeapon.weaponEntry.type
+            slot = damageInfo.sourceWeapon.weaponEntry.slot
+            if damageInfo.sourceWeapon.weaponEntry.name then nameLower = tostring(damageInfo.sourceWeapon.weaponEntry.name):lower() end
+        end)
+    end
+
+    if entryType then
+        for _,r in ipairs(roles) do if entryType == r then return true end end
+    end
+
+    if slot then
+        for _,r in ipairs(roles) do
+            if r == WeaponRole.Handgun and slot == WeaponSlot.Secondary then return true end
+        end
+    end
+
+    if nameLower ~= "" then
+        for _,r in ipairs(roles) do
+            if r == WeaponRole.Handgun and (nameLower:find("pistol") or nameLower:find("revolver") or nameLower:find("condor")) then return true end
+            if (r == WeaponRole.AutoRifle or r == WeaponRole.SemiAutoRifle) and (nameLower:find("assault") or nameLower:find("rifle") or nameLower:find("ak") or nameLower:find("m16")) then return true end
+            if r == WeaponRole.Sniper and (nameLower:find("dmr") or nameLower:find("sniper") or nameLower:find("marksman")) then return true end
+            if r == WeaponRole.Shotgun and (nameLower:find("shotgun") or nameLower:find("eagle") or nameLower:find("pump")) then return true end
+        end
+    end
+
+    return false
+end
+
+-- vehicle destroyed hook
+function TheAnomaly_ExcessiveEdition:OnVehicleDestroyed(vehicle, damageInfo)
+    if not self.currentTask or not damageInfo then return end
+    local pl = self:GetPlayerActor()
+    if damageInfo.sourceActor == pl and self.currentTask.type == "VEHICLE" then
+        self.currentTask.progress = (self.currentTask.progress or 0) + 1
+        if self.currentTask.progress >= (self.currentTask.required or 1) then self:CompleteCurrentTask() end
+    end
+end
+
+-- capture hook
+function TheAnomaly_ExcessiveEdition:OnCapturePointCaptured(capturePoint, newOwner)
+    if not self.currentTask then return end
+    local plTeam = Player and Player.team
+    if newOwner == plTeam and self.currentTask.type == "CAPTURE" then
+        self.currentTask.progress = (self.currentTask.progress or 0) + 1
+        if self.currentTask.progress >= (self.currentTask.required or 1) then self:CompleteCurrentTask() end
+    end
+end
+
+-- player-dealt damage used for DAMAGE task
+function TheAnomaly_ExcessiveEdition:OnPlayerDealtDamage(damageInfo, hit)
+    if not damageInfo or not hit or not hit.actor then return end
+    if not self.currentTask or self.currentTask.type ~= "DAMAGE" then return end
+    if not damageInfo.isPlayerSource then return end
+    local idx = hit.actor.actorIndex
+    if not idx then return end
+    self.damageTracker[idx] = (self.damageTracker[idx] or 0) + (damageInfo.healthDamage or 0)
+    local distinct = 0
+    for k,v in pairs(self.damageTracker) do if v and v > 0 then distinct = distinct + 1 end end
+    self.currentTask.progress = distinct
+    if distinct >= (self.currentTask.required or 1) then self:CompleteCurrentTask() end
+end
+
+-- ===========================
+-- Events: phantom, hide, name steal, fake chat, crosshair, betrayal, observer
+-- (core implementations; reuse from previous builds, with robust cleanup)
+-- ===========================
+function TheAnomaly_ExcessiveEdition:SpawnPhantom()
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+    local pos = pl.position + pl.facingDirection * (30 + Random.RangeInteger(0,24)) + Vector3(0,2,0)
+    local created = nil
+    pcall(function() created = ActorManager.CreateAIActor(Team.Neutral); if created then created:SpawnAt(pos) end end)
+    if not created then self:SetPriorityMessage("Something passed by...", 2.6); return end
+    pcall(function() created.isDeactivated = true; created.isRendered = true; created.name = "PHANTOM" end)
+    table.insert(self.ephemerals, {actor=created, expire=(Time.timeSinceLevelLoad or 0) + CFG.PHANTOM_DURATION})
+    self:SetPriorityMessage("A pale silhouette crosses your view... then it's gone.", 3.2)
+end
+
+function TheAnomaly_ExcessiveEdition:HideEnemiesShort(duration)
+    local enemies = {}
+    pcall(function() enemies = ActorManager.GetAliveActorsOnTeam and ActorManager.GetAliveActorsOnTeam(Player.enemyTeam) or {} end)
+    if not enemies or #enemies==0 then return end
+    local saved = {}
+    for i=1,#enemies do
+        local a = enemies[i]
+        if a then
+            table.insert(saved, {actor=a, rendered=(a.isRendered or false), hitbox=(a.hitboxCollidersAreEnabled or false), frozen=(a.isFrozen or false), aiEnabled = (a.aiController and a.aiController.enabled)})
+            a.isRendered = false
+            a.hitboxCollidersAreEnabled = false
+            a.isFrozen = true
+            pcall(function() if a.aiController then a.aiController.enabled = false end end)
+        end
+    end
+    self:SetPriorityMessage("The battlefield blinks... they vanish.", duration + 0.5)
+    self:Schedule("RestoreHidden", duration, {saved})
+end
+
+function TheAnomaly_ExcessiveEdition:RestoreHidden(saved)
+    if not saved then return end
+    for i=1,#saved do
+        local r = saved[i]
+        if r and r.actor then
+            r.actor.isRendered = r.rendered
+            r.actor.hitboxCollidersAreEnabled = r.hitbox
+            r.actor.isFrozen = r.frozen
+            pcall(function() if r.actor.aiController then r.actor.aiController.enabled = r.aiEnabled end end)
+        end
+    end
+    self:SetPriorityMessage("They return... slightly wrong.", 2.8)
+end
+
+function TheAnomaly_ExcessiveEdition:NameStealer(duration)
+    local actors = ActorManager.actors or {}
+    local original = {}
+    for i=1,#actors do
+        local a = actors[i]
+        if a and not a.isPlayer then original[a] = a.name; a.name = "SUBJECT-76" end
+    end
+    self.nameRestoreMap = original
+    self:SetPriorityMessage("IDENTITY COMPROMISED.", 3.4)
+    self:Schedule("RestoreNames", duration, {original})
+end
+
+function TheAnomaly_ExcessiveEdition:RestoreNames(original)
+    if not original then return end
+    for actor,name in pairs(original) do if actor and name then pcall(function() actor.name = name end) end end
+    self:SetPriorityMessage("Identities... return.", 2.8)
+end
+
+function TheAnomaly_ExcessiveEdition:FakeChat(duration)
+    local feed = {"[SYSTEM]: Subject monitored.","[SYSTEM]: Obedience metrics rising.","[SYSTEM]: Disciplinary action scheduled.","[SYSTEM]: Subject response delayed."}
+    for i=1,#feed do self:Schedule("OverlayOnce", (i-1)*1.2, {feed[i], 1.4}) end
+end
+
+function TheAnomaly_ExcessiveEdition:CrosshairGlitch(seconds)
+    pcall(function() if PlayerHud and PlayerHud.HideUIElement then PlayerHud.HideUIElement(UIElement.Hitmarker) end end)
+    self:SetPriorityMessage("A steady absence where sight should be...", seconds)
+    self:Schedule("RestoreCrosshair", seconds, {})
+end
+
+function TheAnomaly_ExcessiveEdition:RestoreCrosshair()
+    pcall(function() if PlayerHud and PlayerHud.ShowUIElement then PlayerHud.ShowUIElement(UIElement.Hitmarker) end end)
+    self:SetPriorityMessage("Aim finds purchase again.", 1.6)
+end
+
+function TheAnomaly_ExcessiveEdition:Betrayal()
+    local pl = self:GetPlayerActor()
+    if not pl or not pl.squad or not pl.squad.members or #pl.squad.members < 2 then return end
+
+    self:SetPriorityMessage("<color=#FF0000>Your squad turns on you.</color>", 4.0)
+
+    -- pick first non-player living member as "killer" (randomize if you prefer)
+    local killer = nil
+    for i=1,#(pl.squad.members or {}) do
+        local m = pl.squad.members[i]
+        if m and not m.isPlayer and not m.isDead then
+            killer = m
+            break
+        end
+    end
+
+    if killer then
+        -- schedule forced kill attributed to the teammate
+        self:Schedule("ForceKillByTeammate", 2.0, {pl, killer})
+    end
+end
+
+function TheAnomaly_ExcessiveEdition:ForceKillByTeammate(player, killer)
+    if not player or not killer then return end
+    -- Attempt to create a scripted damage that attributes the kill to killer
+    pcall(function()
+        if DamageInfo and DamageSourceType and player.Die then
+            -- create a DamageInfo if the API supports it (best-effort)
+            local di = nil
+            pcall(function() di = DamageInfo(DamageSourceType.Scripted, killer, nil) end)
+            if di then
+                player:Die(di)
+            elseif player.Kill then
+                -- fallback: direct kill
+                player:Kill(player)
+            end
+        elseif player.Kill then
+            player:Kill(player)
+        end
+    end)
+end
+
+function TheAnomaly_ExcessiveEdition:ClearBetray(squad)
+    if squad then pcall(function() squad.attackTarget = nil end) end
+end
+
+function TheAnomaly_ExcessiveEdition:SpawnObserver()
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+    local pos = pl.position + Vector3(Random.RangeInteger(-CFG.OBSERVER_RANGE, CFG.OBSERVER_RANGE), 0, Random.RangeInteger(-CFG.OBSERVER_RANGE, CFG.OBSERVER_RANGE))
+    local obs = nil
+    pcall(function() obs = ActorManager.CreateAIActor(Team.Neutral); if obs then obs:SpawnAt(pos) end end)
+    if not obs then return end
+    pcall(function() obs.isDeactivated = true; obs.isRendered = true; obs.name = "[?]" end)
+    self:Schedule("DespawnObserver", CFG.PHANTOM_DURATION or 8.0, {obs})
+    self:SetPriorityMessage("Something watches from the distance.", 3.2)
+end
+
+function TheAnomaly_ExcessiveEdition:DespawnObserver(actor)
+    if actor and actor.Deactivate then pcall(function() actor:Deactivate() end) end
+end
+
+-- STATIC_VOICE: play a static sfx and show a garbled/binary ingame dialog
+function TheAnomaly_ExcessiveEdition:StaticVoice(duration)
+    duration = duration or 6.0
+    pcall(function() if self.soundBank and self.soundBank.PlayRandom then self.soundBank:PlayRandom() end end)
+    -- show binary-ish dialogue
+    if IngameDialog and IngameDialog.PrintActorText then
+        IngameDialog.PrintActorText("ENTITY_PORTRAIT_2", "01010100 01101000 01100101 00100000...", "???")
+        self:Schedule("HideDialog", duration, {})
+    end
+end
+
+-- SKYBOX_TERROR: tint the skybox & ambient light for a short period
+function TheAnomaly_ExcessiveEdition:SkyboxTerror(duration)
+    duration = duration or 15
+    pcall(function()
+        if RenderSettings and RenderSettings.skybox and RenderSettings.skybox.SetColor then
+            -- store old tint (best-effort)
+            local ok, old = pcall(function() return RenderSettings.skybox:GetColor("_Tint") end)
+            self._savedSkyTint = ok and old or nil
+            RenderSettings.skybox:SetColor("_Tint", Color(0.6,0.05,0.05))
+            RenderSettings.ambientIntensity = 0.25
+        end
+    end)
+    self:Schedule("EndSkyboxTerror", duration, {})
+end
+function TheAnomaly_ExcessiveEdition:EndSkyboxTerror()
+    pcall(function()
+        if RenderSettings and RenderSettings.skybox and self._savedSkyTint then
+            RenderSettings.skybox:SetColor("_Tint", self._savedSkyTint)
+        end
+        RenderSettings.ambientIntensity = 1.0
+    end)
+end
+
+-- GRAVITY_FAILURE: make low gravity for a period
+function TheAnomaly_ExcessiveEdition:GravityFailure(duration)
+    duration = duration or 30
+    pcall(function()
+        if Physics and Physics.gravity then
+            self._savedGravity = Physics.gravity
+            Physics.gravity = Vector3(0, -2.0, 0)
+        end
+    end)
+    self:SetPriorityMessage("Physics has been recalibrated.", 3.0)
+    self:Schedule("EndGravityFailure", duration, {})
+end
+function TheAnomaly_ExcessiveEdition:EndGravityFailure()
+    pcall(function()
+        if Physics and self._savedGravity then Physics.gravity = self._savedGravity end
+        self._savedGravity = nil
+    end)
+end
+
+function TheAnomaly_ExcessiveEdition:MemoryEcho()
+    local prev = self.previousSubjects or {"ALICE"}
+    local idx = 1
+    pcall(function() idx = Random.RangeInteger(1, #prev) end)
+    local subject = prev[idx] or "ALICE"
+    local messageKey = subject .. "_1"
+    local message = (self.ghostMessages and self.ghostMessages[messageKey]) or nil
+
+    if message then
+        local displayMessage = string.format("<color=#9999FF>[%s]: %s</color>", subject, message)
+        self:SetPriorityMessage(displayMessage, 5.0)
+        self:GrantClue("echo_"..messageKey)
+    end
+end
+
+function TheAnomaly_ExcessiveEdition:SpawnSubjectFollower()
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+
+    local pos = nil
+    pcall(function() pos = pl.position - (pl.facingDirection * 25) + Vector3(0,1,0) end)
+    if not pos then return end
+
+    local follower = nil
+    pcall(function()
+        follower = ActorManager.CreateAIActor(Team.Neutral)
+        if follower then
+            follower:SpawnAt(pos)
+            follower.name = "SUBJECT-ALICE"
+            -- make passive; engine differences: try to disable AI movement safely
+            pcall(function() if follower.aiController and follower.aiController.enabled ~= nil then follower.aiController.enabled = false end end)
+        end
+    end)
+
+    if follower then
+        self:SetPriorityMessage("You feel a familiar, hollow gaze behind you.", 4.0)
+        table.insert(self.ephemerals, {actor=follower, expire=(Time.timeSinceLevelLoad or 0) + 25})
+        self:Schedule("MonitorFollower", 1.0, {follower, pl, 20})
+    end
+end
+
+function TheAnomaly_ExcessiveEdition:MonitorFollower(follower, player, ttl)
+    if not follower or ttl <= 0 or follower.isDead or not player then
+        if follower then
+            pcall(function() if follower.Deactivate then follower:Deactivate() end end)
+            self:GrantClue("follower_alice_sighting")
+        end
+        return
+    end
+
+    pcall(function()
+        local dir = player.position - follower.position
+        local dlen = (dir and dir.magnitude) and dir.magnitude or 0
+        if dlen > 0.001 then
+            local norm = dir / dlen
+            local ok, lookRot = pcall(function() return Quaternion.LookRotation(norm) end)
+            if ok and lookRot then
+                -- prefer safe API to set transform.rotation if TeleportTo isn't available
+                if follower.transform and follower.transform.rotation then
+                    follower.transform.rotation = lookRot
+                else
+                    pcall(function() if follower.TeleportTo then follower:TeleportTo(follower.position, lookRot) end end)
+                end
+            end
+        end
+    end)
+
+    self:Schedule("MonitorFollower", 1.0, {follower, player, ttl - 1})
+end
+
+function TheAnomaly_ExcessiveEdition:SpawnFriendlyTarget(name)
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+    local pos = nil
+    pcall(function() pos = pl.position + pl.facingDirection * 20 end)
+    if not pos then return end
+
+    local target = nil
+    pcall(function()
+        target = ActorManager.CreateAIActor and ActorManager.CreateAIActor(pl.team) or nil
+        if target then
+            target:SpawnAt(pos)
+            target.name = name
+            pcall(function() target.canBeTargeted = false end)
+            table.insert(self.ephemerals, {actor=target, expire=(Time.timeSinceLevelLoad or 0) + 120})
+        end
+    end)
+    if target then self:SetPriorityMessage("<color=#FF6666>Target designated: " .. name .. "</color>", 4.0) end
+end
+
+
+-- ===========================
+-- Draw HUD (final, no lastShown gating)
+-- ===========================
+function TheAnomaly_ExcessiveEdition:DrawHUD()
+    local now = Time.timeSinceLevelLoad or 0
+    local finalMessage = ""
+
+    -- 1. Priority message (one-shot notifications)
+    if self.priorityMessage and now < (self.priorityMessageEndTime or 0) then
+        finalMessage = self.priorityMessage
+    end
+
+    -- 2. Show task display ONLY when no priority message active
+    if not (self.priorityMessage and now < (self.priorityMessageEndTime or 0)) and self.currentTask then
+        local txt = self.currentTask.display or ""
+        if (self.sanity or 100) < 40 and Random.RangeInteger(1,10) == 1 then txt = "Kill 5 enemies [###ERROR###]" end
+        local left = math.max(0, math.floor(self.currentTask.timeLeft or 0))
+        local prog = self.currentTask.progress or 0
+        local req = self.currentTask.required or 1
+        finalMessage = string.format("<size=28><b>TASK:</b> %s (%d/%d) | <b>Time:</b> %ds</size>", tostring(txt), prog, req, left)
+        if self.buffEndTime and now < self.buffEndTime then finalMessage = finalMessage .. string.format("\n<b><color=#66FFFF>BUFF ACTIVE: %ds</color></b>", math.max(0, math.ceil(self.buffEndTime - now))) end
+    end
+
+    -- Only update overlay if message changed to avoid flicker
+    if finalMessage ~= (self.lastShownMessage or "") then
+        if finalMessage ~= "" then Overlay.ShowMessage(finalMessage, CFG.UI_REFRESH + 0.05) else Overlay.ShowMessage("", 0.05) end
+        self.lastShownMessage = finalMessage
+    end
+end
+
+-- ===========================
+-- Phases & Triggering
+-- ===========================
+function TheAnomaly_ExcessiveEdition:EnterPhase(n)
+    if not n or n <= (self.phase or 1) then return end
+    self.phase = n
+    if n == 2 then
+        self:SetPriorityMessage("<color=#FFAA66>Anomaly unrest detected.</color>", 4.0)
+        self:Schedule("TriggerWeirdEvent", Random.RangeInteger(3,9), {})
+    elseif n == 3 then
+        self:SetPriorityMessage("<color=#FF6666>Containment failing.</color>", 5.0)
+        self:Schedule("TriggerWeirdEvent", Random.RangeInteger(2,7), {})
+    elseif n == 4 then
+        self:SetPriorityMessage("<color=#AA0000>CONTAINMENT: TERMINAL</color>", 6.0)
+        CFG.EVENT_COOLDOWN_SMALL = 8.0
+        CFG.EVENT_COOLDOWN_LARGE = 30.0
+        self:Schedule("TriggerWeirdEvent", 2.0, {})
+        self:Schedule("TriggerWeirdEvent", 5.0, {})
+        self:Schedule("SpawnSubjectFollower", 8.0, {})
+    elseif choice == "MemoryEcho" then self:MemoryEcho(); self:SetEventCooldown("MemoryEcho", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "SubjectFollower" then self:SpawnSubjectFollower(); self:SetEventCooldown("SubjectFollower", CFG.EVENT_COOLDOWN_LARGE)
+    end
+end
+
+function TheAnomaly_ExcessiveEdition:SetEventCooldown(name, cd)
+    self.eventCooldowns = self.eventCooldowns or {}
+    self.eventCooldowns[name] = (Time.timeSinceLevelLoad or 0) + (cd or CFG.EVENT_COOLDOWN_LARGE)
+end
+
+function TheAnomaly_ExcessiveEdition:EventAvailable(name)
+    if not self.eventCooldowns or not self.eventCooldowns[name] then return true end
+    return (Time.timeSinceLevelLoad or 0) >= self.eventCooldowns[name]
+end
+
+function TheAnomaly_ExcessiveEdition:TriggerWeirdEvent()
+    local pool = EVENT_POOLS[self.phase] or EVENT_POOLS[1]
+    if not pool or #pool == 0 then return end
+    local choice = pool[Random.RangeInteger(1,#pool)]
+    if not self:EventAvailable(choice) then return end
+
+    if choice == "GLITCH" then self:GlitchText(); self:SetEventCooldown("GLITCH", CFG.EVENT_COOLDOWN_SMALL)
+    elseif choice == "PHANTOM" then self:SpawnPhantom(); self:SetEventCooldown("PHANTOM", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "FREEZE" then self:FreezeSquadmate(3 + (self.phase-1)*2); self:SetEventCooldown("FREEZE", CFG.EVENT_COOLDOWN_SMALL)
+    elseif choice == "BLACKOUT" then self:Blackout(0.12, 2.2); self:SetEventCooldown("BLACKOUT", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "HIDE" then self:HideEnemiesShort(2.2 + self.phase); self:SetEventCooldown("HIDE", CFG.EVENT_COOLDOWN_SMALL)
+    elseif choice == "NAME_STEAL" then self:NameStealer(CFG.NAME_STEAL_DURATION); self:SetEventCooldown("NAME_STEAL", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "CHAT" then self:FakeChat(CFG.FAKE_CHAT_DURATION or 8.0); self:SetEventCooldown("CHAT", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "CROSSHAIR" then self:CrosshairGlitch(4.0); self:SetEventCooldown("CROSSHAIR", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "BETRAYAL" then self:Betrayal(); self:SetEventCooldown("BETRAYAL", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "OBSERVER" then self:SpawnObserver(); self:SetEventCooldown("OBSERVER", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "RISE_WATER" then self:TriggerFlood(60); self:SetEventCooldown("RISE_WATER", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "WORLD_PAINT" then self:TriggerWorldPaint(18); self:SetEventCooldown("WORLD_PAINT", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "FALSE_HOPE" then self:TriggerFalseHope(); self:SetEventCooldown("FALSE_HOPE", CFG.EVENT_COOLDOWN_LARGE) end
+
+    local baseDelay = 45.0
+    local phaseModifier = (self.phase - 1) * 10.0
+    local sanityModifier = (100.0 - (self.sanity or 100)) * 0.2
+    local delay = baseDelay - phaseModifier - sanityModifier
+    delay = Random.Range(delay * 0.8, delay * 1.2)
+    delay = clamp(delay, 10.0, 60.0)
+    self:Schedule("TriggerWeirdEvent", delay, {})
+end
+
+-- GLITCH
+function TheAnomaly_ExcessiveEdition:GlitchText()
+    local s = pick(MSG.GLITCH)
+    self:SetPriorityMessage("<color=#FF4444>"..tostring(s).."</color>", 3.0)
+end
+
+-- FREEZE (reused from earlier)
+function TheAnomaly_ExcessiveEdition:FreezeSquadmate(seconds)
+    local pl = self:GetPlayerActor()
+    if not pl or not pl.squad or not pl.squad.members or #pl.squad.members < 2 then return end
+    local members = pl.squad.members
+    for tries=1,8 do
+        local idx = Random.RangeInteger(1,#members)
+        local m = members[idx]
+        if m and not m.isPlayer and not m.isDead then
+            m.isFrozen = true
+            self:Schedule("Unfreeze", seconds, {m})
+            self:SetPriorityMessage("One of your squad freezes and stares...", 3.0)
+            break
+        end
+    end
+end
+
+function TheAnomaly_ExcessiveEdition:Unfreeze(actor)
+    if actor then actor.isFrozen = false end
+end
+
+-- BLACKOUT
+function TheAnomaly_ExcessiveEdition:Blackout(fadeTime, vanishTime)
+    local savedHUD = nil
+    pcall(function() savedHUD = PlayerHud.hudGameModeEnabled; PlayerHud.hudGameModeEnabled = false; PlayerHud.hudPlayerEnabled = false end)
+    local actors = ActorManager.actors or {}
+    local saved = {}
+    for i=1,#actors do
+        local a = actors[i]
+        if a and not a.isPlayer then
+            table.insert(saved, {actor=a, rendered=(a.isRendered or false), hitbox=(a.hitboxCollidersAreEnabled or false), frozen=(a.isFrozen or false), aiEnabled = (a.aiController and a.aiController.enabled)})
+            a.isRendered = false
+            a.hitboxCollidersAreEnabled = false
+            a.isFrozen = true
+            pcall(function() if a.aiController then a.aiController.enabled = false end end)
+        end
+    end
+    self:SetPriorityMessage("", fadeTime)
+    self:Schedule("RestoreBlackoutState", fadeTime + vanishTime, {saved, savedHUD})
+end
+
+function TheAnomaly_ExcessiveEdition:RestoreBlackoutState(saved, savedHUD)
+    self:RestoreHidden(saved)
+    pcall(function() if savedHUD ~= nil then PlayerHud.hudGameModeEnabled = savedHUD; PlayerHud.hudPlayerEnabled = true end end)
+    self:SetPriorityMessage("Reality stutters... then returns.", 3.0)
+end
+
+-- ===========================
+-- New: Flood / RISE_WATER
+-- ===========================
+function TheAnomaly_ExcessiveEdition:TriggerFlood(duration)
+    local startLevel = 0
+    pcall(function() if Water and Water.GetWaterLevel then startLevel = Water.GetWaterLevel() end end)
+    self:Flood(startLevel, duration or 60)
+end
+
+-- ===========================
+-- New: WORLD_PAINT (make actors bleed)
+-- ===========================
+function TheAnomaly_ExcessiveEdition:TriggerWorldPaint(duration)
+    duration = duration or 15
+    local ticks = math.max(1, math.floor(duration / 0.5))
+    for i=1,ticks do self:Schedule("DoWorldPaintTick", (i-1)*0.5, {}) end
+end
+
+function TheAnomaly_ExcessiveEdition:DoWorldPaintTick()
+    pcall(function()
+        if BuiltInFeatures and BuiltInFeatures.bloodDecals ~= nil then BuiltInFeatures.bloodDecals = true end
+        local actors = ActorManager.actors or {}
+        for i=1,#actors do
+            local a = actors[i]
+            if a and not a.isDead then
+                if a.TakeDamage then pcall(function() a:TakeDamage(0.1) end) end
+            end
+        end
+    end)
+end
+
+-- ===========================
+-- FALSE_HOPE (gift -> explosion)
+-- ===========================
+function TheAnomaly_ExcessiveEdition:TriggerFalseHope()
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+
+    -- Tease the player with a "reward"
+    self:SetPriorityMessage("A small crate appears nearby.", 4.0)
+
+    local spawnPos = pl.position 
+        + pl.facingDirection * 6 
+        + Vector3(Random.RangeInteger(-2,2), 0, Random.RangeInteger(-2,2))
+
+    self:Schedule("SpawnFalseCrate", 1.0, {spawnPos})
+end
+
+
+function TheAnomaly_ExcessiveEdition:SpawnFalseCrate(pos)
+    pcall(function()
+        -- Attempt prefab load
+        local cratePrefab = nil
+        if Resources and Resources.Load then
+            cratePrefab = Resources.Load("FakeCrate")
+        end
+
+        if cratePrefab and cratePrefab.gameObject then
+            -- Spawn prefab
+            local go = GameObject.Instantiate(cratePrefab.gameObject)
+            if go and go.transform then
+                go.transform.position = pos
+            end
+            -- Monitor for 30s, checking every 0.5s
+            self:Schedule("MonitorFalseCrateProximity", 0.5, {go, 30})
+
+        else
+            -- Fallback: fake actor as bait
+            local fake = ActorManager.CreateAIActor(Team.Neutral)
+            if fake then
+                fake:SpawnAt(pos)
+                fake.name = "GIFT"
+                table.insert(self.ephemerals, {actor=fake, expire=(Time.timeSinceLevelLoad or 0) + 30})
+                self:Schedule("MonitorFakeActorProximity", 0.5, {fake, 30})
+            end
+        end
+    end)
+end
+
+
+function TheAnomaly_ExcessiveEdition:MonitorFalseCrateProximity(go, lifespan)
+    if not go or not go.transform then return end
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+
+    local dist = (pl.position - go.transform.position).magnitude
+    if dist < 2.2 then
+        -- Boom
+        pcall(function()
+            if ActorManager and ActorManager.Explode then
+                ActorManager.Explode(go.transform.position, 3.0, pl.team)
+            end
+        end)
+        self:SetPriorityMessage("<color=#FF4444>It was a trap.</color>", 3.0)
+        pcall(function() if go then GameObject.Destroy(go) end end)
+        return
+    end
+
+    lifespan = lifespan - 0.5
+    if lifespan > 0 then
+        self:Schedule("MonitorFalseCrateProximity", 0.5, {go, lifespan})
+    else
+        pcall(function() if go then GameObject.Destroy(go) end end)
+    end
+end
+
+
+function TheAnomaly_ExcessiveEdition:MonitorFakeActorProximity(actor, lifespan)
+    if not actor or not actor.position then return end
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+
+    local dist = (pl.position - actor.position).magnitude
+    if dist < 2.2 then
+        -- Boom
+        if ActorManager and ActorManager.Explode then
+            ActorManager.Explode(actor.position, 3.0, pl.team)
+        end
+        self:SetPriorityMessage("<color=#FF4444>It was a trap.</color>", 3.0)
+        pcall(function() if actor and actor.Deactivate then actor:Deactivate() end end)
+        return
+    end
+
+    lifespan = lifespan - 0.5
+    if lifespan > 0 then
+        self:Schedule("MonitorFakeActorProximity", 0.5, {actor, lifespan})
+    else
+        pcall(function() if actor and actor.Deactivate then actor:Deactivate() end end)
+    end
+end
+
+
+-- Alternative variant (uses prefab monitor directly)
+function TheAnomaly_ExcessiveEdition:FalseHope(radius)
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+
+    local spawnPos = pl.position + pl.facingDirection * 3
+    pcall(function()
+        local prefab = nil
+        if Resources and Resources.Load then
+            prefab = Resources.Load("FakeCrate")
+        end
+
+        if prefab and prefab.gameObject and pl.gameObject then
+            local obj = GameObject.Instantiate(prefab.gameObject, spawnPos, Quaternion.identity)
+            self:Schedule("MonitorFalseHope", 0.25, {obj, pl, radius or 2.5, 20})
+        end
+    end)
+end
+
+
+function TheAnomaly_ExcessiveEdition:MonitorFalseHope(obj, pl, radius, ttl)
+    if not obj or not pl or ttl <= 0 then
+        pcall(function() if obj and obj.Destroy then obj:Destroy() end end)
+        return
+    end
+
+    local ok, dist = pcall(function()
+        return Vector3.Distance(pl.position, obj.transform.position)
+    end)
+
+    if ok and dist and dist <= (radius or 2.5) then
+        -- Boom
+        pcall(function()
+            if ActorManager and ActorManager.Explode then
+                ActorManager.Explode(obj.transform.position, 6.0, pl.team)
+            end
+            if obj and obj.Destroy then obj:Destroy() end
+        end)
+        return
+    end
+
+    self:Schedule("MonitorFalseHope", 0.25, {obj, pl, radius, ttl - 1})
+end
+
+-- ===========================
+-- Timeline processor (handles DIALOGUE, UNLOCKS, LORE)
+-- ===========================
+function TheAnomaly_ExcessiveEdition:ProcessTimeline()
+    -- Safety check for timeline
+    if not self.TIMELINE_EVENTS or #self.TIMELINE_EVENTS == 0 then
+        self:Schedule("ProcessTimeline", 30, {})
+        return
+    end
+
+    local event = self.TIMELINE_EVENTS[1]
+    if not event then return end
+
+    if self.playTime >= event.time then
+        if event.action == "UNLOCK_EVENT" and event.value then
+            self.unlockedEvents = self.unlockedEvents or {}
+            if not self.unlockedEvents[event.value] then
+                self.unlockedEvents[event.value] = true
+                -- ensure phase 3 pool exists
+                EVENT_POOLS[3] = EVENT_POOLS[3] or {}
+                table.insert(EVENT_POOLS[3], event.value)
+                if event.message then
+                    self:SetPriorityMessage(event.message, 4.0)
+                end
+            end
+
+        elseif event.action == "LORE_DROP" then
+            self:SetPriorityMessage("<color=#CCCCCC>" .. tostring(event.value) .. "</color>", 6.0)
+
+        elseif event.action == "PHASE_MESSAGE" then
+            self:SetPriorityMessage(event.value, 5.0)
+
+        elseif event.action == "DIALOGUE" then
+            pcall(function()
+                if IngameDialog and IngameDialog.PrintActorText then
+                    IngameDialog.PrintActorText(event.pose or "Unknown", event.text or "", event.name or "")
+                end
+            end)
+            self:Schedule("HideDialog", 7.0, {})
+
+        elseif event.action == "UNLOCK_TASK" and event.value then
+            -- CHUNK G: Unlock task by ID or prototype table
+            local inserted = false
+
+            if type(event.value) == "table" and event.value.id then
+                table.insert(TASK_POOL, shallowcopy(event.value))
+                inserted = true
+
+            elseif type(event.value) == "string" then
+                if LATE_GAME_TASKS then
+                    for j = 1, #LATE_GAME_TASKS do
+                        if LATE_GAME_TASKS[j].id == event.value then
+                            table.insert(TASK_POOL, shallowcopy(LATE_GAME_TASKS[j]))
+                            inserted = true
+                            break
+                        end
+                    end
+                end
+            end
+
+            if inserted and event.message then
+                self:SetPriorityMessage(event.message, 4.0)
+            end
+        end
+
+        -- Remove the processed event
+        table.remove(self.TIMELINE_EVENTS, 1)
+    end
+
+    -- Schedule next timeline check
+    self:Schedule("ProcessTimeline", 5, {})
+end
+
+function TheAnomaly_ExcessiveEdition:HideDialog()
+    pcall(function()
+        if IngameDialog and IngameDialog.Hide then
+            IngameDialog.Hide()
+        end
+    end)
+end
+
+-- ===========================
+-- Match end & final blackout
+-- ===========================
+function TheAnomaly_ExcessiveEdition:OnMatchEnd(winningTeam)
+    pcall(function() if CurrentEvent and CurrentEvent.Consume then CurrentEvent.Consume() end end)
+    self.matchHasEnded = true
+    self.currentTask = nil
+    self:SetPriorityMessage("", 0.1)
+
+    if (self.cluesFound or 0) >= 3 then
+        self:Schedule("OverlayOnce", 1.0, {"<size=36>THE ECHOES ARE CONNECTED.</size>", 3.0})
+        self:Schedule("OverlayOnce", 4.5, {"<size=28>You remembered their names.</size>", 4.0})
+        self:Schedule("OverlayOnce", 9.0, {"<size=32><color=#66FF66>WAKE UP.</color></size>", 5.0})
+        self:Schedule("FinalFadeToWhite", 12.0, {})
+    elseif (self.karma or 0) >= 10 then
+        self:Schedule("OverlayOnce", 1.0, {"<size=36>The data is clean.</size>", 2.0})
+        self:Schedule("OverlayOnce", 3.5, {"<size=28>You followed the path.</size>", 3.0})
+        self:Schedule("OverlayOnce", 7.0, {"<size=28>The simulation may rest.</size>", 4.0})
+        self:Schedule("FinalFadeToWhite", 12.0, {})
+    else
+        self:Schedule("OverlayOnce", 1.0, {"<size=40>V I C T O R Y</size>", 2.0})
+        self:Schedule("OverlayOnce", 3.5, {"<size=40>is an illusion</size>", 3.0})
+        self:Schedule("OverlayOnce", 7.0, {"<size=30>The contract is complete.</size>", 4.0})
+        self:Schedule("OverlayOnce", 11.5, {"<size=40><color=#FF0000>But you are not free.</color></size>", 5.0})
+        self:Schedule("FinalFadeToBlack", 14.0, {})
+    end
+
+    if (self.karma or 0) >= 15 or (self.sanity or 100) <= 10 or (self.cluesFound or 0) >= 3 then
+        self:Schedule("PostMatchDialogue", 20.0, {})
+    end
+end
+
+-- helper fades
+function TheAnomaly_ExcessiveEdition:FinalFadeToWhite()
+    pcall(function()
+        if EffectUi then
+            if EffectUi.ChangeFadeColor then EffectUi.ChangeFadeColor(Color.white) end
+            if EffectUi.FadeOut then EffectUi.FadeOut(0, 3.0) end
+        end
+    end)
+end
+function TheAnomaly_ExcessiveEdition:FinalFadeToBlack()
+    pcall(function()
+        if EffectUi then
+            if EffectUi.ChangeFadeColor then EffectUi.ChangeFadeColor(Color.black) end
+            if EffectUi.FadeOut then EffectUi.FadeOut(0, 3.0) end
+        end
+    end)
+end
+
+function TheAnomaly_ExcessiveEdition:PostMatchDialogue()
+    -- A long, multi-line conversation between two entities. This is theatrical and long by design.
+    local lines = {
+        {who="ENTITY_PORTRAIT_1", name="???:", text="Subject lasted longer than predicted."},
+        {who="ENTITY_PORTRAIT_2", name="VOICE:", text="They learn the rhythm. They count the beats for us."},
+        {who="ENTITY_PORTRAIT_1", name="???:", text="Do you think they felt anything? That flicker of hope?"},
+        {who="ENTITY_PORTRAIT_2", name="VOICE:", text="Hope is useful. It keeps them moving. We fed them tasks."},
+        {who="ENTITY_PORTRAIT_1", name="???:", text="Their name was " .. tostring(Player and Player.name or "Subject") .. ", wasn't it?"},
+        {who="ENTITY_PORTRAIT_2", name="VOICE:", text="Names are soft. We prefer rhythms."},
+        {who="ENTITY_PORTRAIT_1", name="???:", text="Keep the record. Save the echo. There will be another."},
+        {who="ENTITY_PORTRAIT_2", name="VOICE:", text="Always another. Always the clock."},
+        -- repeat or add many lines for length
+    }
+
+    -- show the whole conversation spaced out
+    local delay = 0.5
+    for i=1,#lines do
+        local ln = lines[i]
+        self:Schedule("ShowPostDialogLine", delay, {ln.who, ln.name, ln.text})
+        delay = delay + 5.0 -- 5s between lines
+    end
+end
+
+function TheAnomaly_ExcessiveEdition:ShowPostDialogLine(pose, name, text)
+    pcall(function()
+        if IngameDialog and IngameDialog.PrintActorText then
+            IngameDialog.PrintActorText(pose or "Unknown", text or "", name or "")
+            -- auto-hide after 4 seconds
+            self:Schedule("HideDialog", 4.0, {})
+        end
+    end)
+end
+
+-- ===========================
+-- Buff State
+-- ===========================
+function TheAnomaly_ExcessiveEdition:HandleBuffState()
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+    local now = Time.timeSinceLevelLoad or 0
+    local active = (self.buffEndTime or 0) > now
+    if active and not self.isBuffActive then
+        self._origSpeedMul = self._origSpeedMul == nil and (pl.speedMultiplier or 1.0) or self._origSpeedMul
+        pcall(function() pl.speedMultiplier = (pl.speedMultiplier or 1.0) * CFG.BUFF_SPEED_MULT end)
+        self.isBuffActive = true
+    elseif not active and self.isBuffActive then
+        pcall(function() pl.speedMultiplier = self._origSpeedMul or 1.0 end)
+        self.isBuffActive = false
+        self._origSpeedMul = nil
+    end
+end
+
+-- ===========================
+-- Cleanup
+-- ===========================
+function TheAnomaly_ExcessiveEdition:OnDisable()
+    if self.ephemerals then
+        for i=#self.ephemerals,1,-1 do
+            local e = self.ephemerals[i]
+            if e and e.actor then
+                pcall(function() if e.actor.Deactivate then e.actor:Deactivate() end end)
+                pcall(function() if e.actor.gameObject then GameObject.Destroy(e.actor.gameObject) end end)
+            end
+            table.remove(self.ephemerals, i)
+        end
+    end
+
+    pcall(function() if GameEvents and GameEvents.onActorDiedInfo and GameEvents.onActorDiedInfo.RemoveListener then GameEvents.onActorDiedInfo:RemoveListener(self, "OnActorDiedInfo") end end)
+    pcall(function() if GameEvents and GameEvents.onCapturePointCaptured and GameEvents.onCapturePointCaptured.RemoveListener then GameEvents.onCapturePointCaptured:RemoveListener(self, "OnCapturePointCaptured") end end)
+    pcall(function() if GameEvents and GameEvents.onVehicleDestroyed and GameEvents.onVehicleDestroyed.RemoveListener then GameEvents.onVehicleDestroyed:RemoveListener(self, "OnVehicleDestroyed") end end)
+    pcall(function() if GameEvents and GameEvents.onActorSpawn and GameEvents.onActorSpawn.RemoveListener then GameEvents.onActorSpawn:RemoveListener(self, "OnActorSpawned") end end)
+    pcall(function() if GameEvents and GameEvents.onPlayerDealtDamage and GameEvents.onPlayerDealtDamage.RemoveListener then GameEvents.onPlayerDealtDamage:RemoveListener(self, "OnPlayerDealtDamage") end end)
+    pcall(function() if GameEvents and GameEvents.onProjectileSpawned and GameEvents.onProjectileSpawned.RemoveListener then GameEvents.onProjectileSpawned:RemoveListener(self, "OnProjectileSpawned") end end)
+    pcall(function() if GameEvents and GameEvents.onMatchEnd and GameEvents.onMatchEnd.RemoveListener then GameEvents.onMatchEnd:RemoveListener(self, "OnMatchEnd") end end)
+end
+
+function TheAnomaly_ExcessiveEdition:DebugPrintState()
+    safeLog("sanity="..tostring(self.sanity).." phase="..tostring(self.phase).." completed="..tostring(self.completedTasks).." skips="..tostring(self.totalSkips).." karma="..tostring(self.karma))
+end
+
+-- ===========================
+-- Persistence
+-- ===========================
+function TheAnomaly_ExcessiveEdition:OnSave()
+    return { 
+        sanity = self.sanity, 
+        phase = self.phase, 
+        completed = self.completedTasks, 
+        karma = self.karma,
+        cluesFound = self.cluesFound,
+        clueLogSeen = self.clueLogSeen
+    }
+end
+
+function TheAnomaly_ExcessiveEdition:OnLoad(data)
+    if data then
+        if data.sanity then self.sanity = data.sanity end
+        if data.phase then self.phase = data.phase end
+        if data.completed then self.completedTasks = data.completed end
+        if data.karma then self.karma = data.karma end
+        if data.cluesFound then self.cluesFound = data.cluesFound end
+        if data.clueLogSeen then self.clueLogSeen = data.clueLogSeen end
+        -- ensure safe defaults
+        self.clueLogSeen = self.clueLogSeen or {}
+        self.cluesFound = self.cluesFound or 0
+    end
+end
+
+
+-- ============================================================================
+-- End of TheAnomaly_ExcessiveEdition_Final_RC.raven
+-- ============================================================================
+
