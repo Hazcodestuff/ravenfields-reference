@@ -1,0 +1,1575 @@
+-- ============================================================================
+-- ProjectCleanse_PurificationProtocol.raven
+-- A slowburn horror mod for Ravenfield inspired by TheAnomaly
+-- 
+-- CONCEPT:
+-- You are a "Cleaner" - an operative sent to purge corrupted zones.
+-- But the corruption isn't just external... it's in you too.
+-- 
+-- CORE MECHANICS:
+-- - PURITY METER (replaces Sanity): Decreases when near corruption, increases when cleansing
+-- - CORRUPTION PHASES: The world becomes more distorted as your purity drops
+-- - CLEANSING TASKS: Complete objectives to purify areas and yourself
+-- - THE INFECTION: At low purity, you start seeing/hearing things that may or may not be real
+-- - FALSE CLEANSES: Some "purification" tasks actually corrupt you further
+-- - WHISPERS OF THE CLEANSED: Ghosts of previous cleaners offer cryptic advice
+-- - FINAL CHOICE: Purify everything (including yourself) or embrace the corruption
+-- ============================================================================
+
+behaviour("ProjectCleanse")
+
+-- ===========================
+-- CONFIGURATION
+-- ===========================
+local CFG = {
+    STARTUP_GRACE = 12.0,           -- Time before first task
+    PURITY_DECAY_PER_SEC = 0.018,   -- Natural purity drain
+    PURITY_DRAIN_NEAR_CORRUPTION = 0.04,  -- Extra drain near corrupted entities
+    PURITY_GAIN_CLEANSE = 8.0,      -- Purity gained per successful cleanse
+    TASK_COOLDOWN = 6.0,            -- Time between tasks
+    UI_REFRESH = 0.15,
+    TIMER_TICK = 1.0,
+    BUFF_DURATION = 18.0,
+    BUFF_DAMAGE_MULT = 1.25,        -- "Purified Fury" damage boost
+    BUFF_SPEED_MULT = 1.20,         -- "Divine Speed" movement boost
+    MAX_O_PRESS = 14,               -- Max times player can press skip key
+    SKIP_PURITY_PENALTY = 5,        -- Purity lost per skip
+    SKIP_MINOR_HIT = 8,             -- Minor punishment threshold
+    SKIP_MAJOR_HIT = 22,            -- Major punishment threshold
+    EVENT_COOLDOWN_SMALL = 15.0,
+    EVENT_COOLDOWN_LARGE = 75.0,
+    PHASE2_PURITY = 70,             -- Enter phase 2 when purity drops below this
+    PHASE3_PURITY = 45,             -- Enter phase 3
+    PHASE4_PURITY = 20,             -- Enter phase 4 (endgame)
+    NAME_STEAL_DURATION = 10.0,
+    PHANTOM_DURATION = 8.0,
+    FAKE_CHAT_DURATION = 8.0,
+    OBSERVER_RANGE = 100.0,
+    MAX_SCHEDULED = 280,
+    CORRUPTION_SPREAD_RATE = 0.3,   -- How fast corruption spreads in phase 3+
+    FLOOD_STEP = 0.3,               -- Black sludge rise rate
+    FLOOD_TICK = 0.4
+}
+
+local DEBUG = { LOGGING_ENABLED = true, TIMESKIP_ENABLED = true, VERBOSE = false }
+
+-- ===========================
+-- TASK POOL - Cleansing themed
+-- ===========================
+local TASK_POOL = {
+    -- PHASE 1: Basic Cleansing Operations (purity 100-70)
+    { id="CLEANSE_ZONE_1", display="Purify the marked zone. Stand within it for 25s.", type="HOLD_ZONE", required=25, timeLimit=45, phaseMin=1, rarity=1 },
+    { id="PURGE_CORRUPT_3", display="Eliminate 3 corrupted entities.", type="WEAPON_ROLE", roleSet={WeaponRole.AutoRifle, WeaponRole.SemiAutoRifle, WeaponRole.Shotgun}, required=3, timeLimit=60, phaseMin=1, rarity=1 },
+    { id="SURVIVE_AREA_30", display="Survive in the contaminated zone for 30s.", type="SURVIVE_ZONE", required=30, timeLimit=40, phaseMin=1, rarity=1 },
+    { id="NOFIRE_PRAYER_15", display="Channel purity - don't fire for 15s.", type="NO_FIRE", required=15, timeLimit=20, phaseMin=1, rarity=1 },
+    { id="HEADSHOT_PURIFY_2", display="Perform 2 clean headshot eliminations.", type="HEADSHOT", required=2, timeLimit=45, phaseMin=1, rarity=1 },
+    { id="COLLECT_RELIC_1", display="Find and collect a Sacred Relic fragment.", type="SCAVENGE", required=1, timeLimit=90, phaseMin=1, rarity=2 },
+    { id="PROTECT_CLEANSE_45", display="Protect the cleansing ritual for 45s.", type="DEFEND_POINT", required=45, timeLimit=60, phaseMin=1, rarity=2 },
+    { id="STILL_MEDITATE_12", display="Meditate - stand perfectly still for 12s.", type="STAND_STILL", required=12, timeLimit=18, phaseMin=1, rarity=1 },
+    
+    -- PHASE 2: Deeper Contamination (purity 70-45)
+    { id="CLEANSE_ZONE_2", display="Purify TWO marked zones sequentially.", type="HOLD_MULTI_ZONE", required=2, timeLimit=90, phaseMin=2, rarity=2 },
+    { id="PURGE_CORRUPT_5", display="Eliminate 5 corrupted entities.", type="KILL_COUNT", required=5, timeLimit=80, phaseMin=2, rarity=2 },
+    { id="WHISPER_SURVIVE_15", display="Endure the whispers for 15 seconds.", type="WHISPER", required=15, timeLimit=25, phaseMin=2, rarity=2 },
+    { id="FIND_LOG_1", display="Locate a fallen Cleaner's log entry.", type="TERMINAL_READ", required=1, timeLimit=120, phaseMin=2, rarity=2 },
+    { id="REJECT_TEMPTATION", display="A corrupted crate appears. Do NOT touch it for 30s.", type="REFUSE_REWARD", required=30, timeLimit=40, phaseMin=2, rarity=3 },
+    { id="STEALTH_PURIFY_25", display="Move unseen through contamination for 25s.", type="STEALTH", required=25, timeLimit=40, phaseMin=2, rarity=2 },
+    { id="VEHICLE_CORRUPT_1", display="Destroy 1 corrupted vehicle.", type="VEHICLE", required=1, timeLimit=90, phaseMin=2, rarity=2 },
+    { id="CAPTURE_ALTAR_1", display="Capture and sanctify a corrupted altar.", type="CAPTURE", required=1, timeLimit=75, phaseMin=2, rarity=2 },
+    
+    -- PHASE 3: The Infection Spreads (purity 45-20)
+    { id="CLEANSE_HEAVY_60", display="Hold the purification circle for 60s against waves.", type="HOLD_WAVE", required=60, timeLimit=90, phaseMin=3, rarity=3 },
+    { id="PURGE_ELITE_2", display="Eliminate 2 elite corrupted hosts.", type="ELITE_KILL", required=2, timeLimit=120, phaseMin=3, rarity=3 },
+    { id="LOOK_AWAY_40", display="Don't look directly at corruption for 40s.", type="LOOK_AWAY", required=40, timeLimit=60, phaseMin=3, rarity=3 },
+    { id="BLOOD_RITUAL", display="Participate in a blood ritual (damage yourself).", type="SELF_DAMAGE", required=1, timeLimit=30, phaseMin=3, rarity=3 },
+    { id="ECHO_MEMORY_2", display="Experience 2 Memory Echoes of fallen Cleaners.", type="ECHO", required=2, timeLimit=180, phaseMin=3, rarity=3 },
+    { id="CORRUPTED_ALLY", display="A squadmate shows signs of infection. Monitor them for 45s.", type="MONITOR_ALLY", required=45, timeLimit=60, phaseMin=3, rarity=3 },
+    { id="FALSE_VISION", display="Follow a false vision to its source.", type="FOLLOW_MARKER", required=1, timeLimit=120, phaseMin=3, rarity=3 },
+    
+    -- PHASE 4: Terminal Corruption (purity <20)
+    { id="FINAL_CHOICE", display="Make your choice: Purify All or Embrace Shadow.", type="CHOICE", required=1, timeLimit=300, phaseMin=4, rarity=4 },
+    { id="KILL_INFECTED_SELF", display="The infection is in YOU. There is only one cure.", type="SUICIDE_TEST", required=1, timeLimit=60, phaseMin=4, rarity=4 },
+    { id="PURGE_BETRAYED", display="A fellow Cleaner has turned. End them.", type="KILL_TEAMMATE", required=1, timeLimit=90, phaseMin=4, rarity=4 },
+    { id="ASCENSION_RITUAL", display="Complete the Ascension Ritual at the central altar.", type="RITUAL_COMPLETE", required=1, timeLimit=180, phaseMin=4, rarity=4 },
+    { id="COLLECT_ALL_RELICS", display="Gather all 5 Sacred Relic fragments.", type="SCAVENGE", required=5, timeLimit=300, phaseMin=4, rarity=4 },
+    { id="BLACK_SLUDGE_SURVIVE", display="Survive as the black sludge rises for 90s.", type="SURVIVE_FLOOD", required=90, timeLimit=120, phaseMin=4, rarity=4 }
+}
+
+-- Late game supplemental tasks
+local LATE_GAME_TASKS = {
+    { id="CHAIN_PURIFICATION", display="Purify 3 zones without dying.", type="CHAIN_ZONE", required=3, timeLimit=300, phaseMin=3, rarity=3 },
+    { id="ECHO_CHAIN_3", display="Trigger three MemoryEcho events in one life.", type="ECHO_CHAIN", required=3, timeLimit=600, phaseMin=3, rarity=3 },
+    { id="RESIST_WHISPERS_120", display="Resist the whispers for 2 minutes straight.", type="RESIST_WHISPER", required=120, timeLimit=150, phaseMin=4, rarity=4 }
+}
+
+-- ===========================
+-- MESSAGES / LORE (phase aware)
+-- ===========================
+local MSG = {
+    SUCCESS = {
+        [1] = {
+            "Purity restored. Continue the work.",
+            "The light grows stronger.",
+            "Clean execution, Cleaner.",
+            "Another stain removed from reality.",
+            "Good. The Protocol approves.",
+            "Sanctification proceeding as planned.",
+            "You serve the Light well.",
+            "The corruption recedes.",
+            "Well done. Stay vigilant.",
+            "One step closer to total cleansing."
+        },
+        [2] = {
+            "Your resolve holds. For now.",
+            "The whispers grow louder... ignore them.",
+            "Purity maintained despite exposure.",
+            "They notice your persistence.",
+            "Do not trust what you see.",
+            "The Protocol records your success.",
+            "Stay focused. Doubt is contamination.",
+            "Another victory against the dark.",
+            "Your light pierces the shadow.",
+            "Continue. Do not question."
+        },
+        [3] = {
+            "The infection spreads. You must move faster.",
+            "They say your name in the darkness.",
+            "Purity flickers but does not die.",
+            "The fallen watch your progress.",
+            "Some cleansings... require sacrifice.",
+            "You hear them now, don't you?",
+            "The line between pure and corrupt thins.",
+            "Keep going. There's no other way.",
+            "The Protocol demands completion.",
+            "Your soul still burns. Barely."
+        },
+        [4] = {
+            "There is no return. Only forward.",
+            "The final choice approaches.",
+            "All paths lead to revelation.",
+            "What will you become?",
+            "The truth was never pure.",
+            "Cleansing requires destruction.",
+            "Even light casts shadows.",
+            "You understand now, don't you?",
+            "The Protocol has its price.",
+            "Finish what you started."
+        }
+    },
+
+    FAIL = {
+        [1] = {
+            "Contamination detected. Retry.",
+            "The stain remains.",
+            "Focus, Cleaner. Try again.",
+            "Purity compromised. Recalibrating.",
+            "That was inadequate.",
+            "The corruption wins this round.",
+            "You hesitated. Don't.",
+            "Re-attempt the cleansing.",
+            "Weakness is a luxury you can't afford.",
+            "The Protocol expects better."
+        },
+        [2] = {
+            "Failure noted in the ledger.",
+            "The whispers were right about you.",
+            "Your light dims.",
+            "Contamination spreading...",
+            "They laugh at your failure.",
+            "The fallen expected this.",
+            "Doubt costs you dearly.",
+            "Another mark against your soul.",
+            "The darkness grows.",
+            "Question your methods, not the mission."
+        },
+        [3] = {
+            "The infection takes hold.",
+            "You're becoming what you hunt.",
+            "The Protocol considers termination.",
+            "So much corruption...",
+            "They remember your failure.",
+            "The line is crossed.",
+            "Purity may never return.",
+            "The whispers grow victorious.",
+            "Your name joins the fallen.",
+            "Redemption grows distant."
+        },
+        [4] = {
+            "Terminal failure detected.",
+            "The choice is made for you.",
+            "All is consumed.",
+            "The Protocol resets.",
+            "Nothing remains.",
+            "Darkness prevails.",
+            "Your story ends here.",
+            "The cycle continues without you.",
+            "Oblivion claims another.",
+            "There was never another way."
+        }
+    },
+
+    SKIP = {
+        [1] = {
+            "Avoidance noted, Cleaner.",
+            "Taking the easy path?",
+            "The Protocol sees your hesitation.",
+            "Skipping won't cleanse your soul.",
+            "Recorded: reluctance.",
+            "Duty avoided.",
+            "The stain remains uncleaned.",
+            "Cowardice or wisdom? We'll see.",
+            "Your resolve weakens.",
+            "Marked for review."
+        },
+        [2] = {
+            "Every skip feeds the corruption.",
+            "The whispers approve your retreat.",
+            "Running from your purpose?",
+            "The fallen skipped too.",
+            "Your light dims with each avoidance.",
+            "The Protocol loses faith.",
+            "Contamination accelerates.",
+            "They remember your weakness.",
+            "The dark waits patiently.",
+            "Skip enough, and you'll join them."
+        },
+        [3] = {
+            "You cannot outrun what's inside you.",
+            "The infection welcomes cowards.",
+            "Each skip stains your soul deeper.",
+            "The Protocol considers you compromised.",
+            "The fallen know your name now.",
+            "Avoidance is surrender.",
+            "Your purity bleeds away.",
+            "The whispers call you theirs.",
+            "There's less of you to save.",
+            "The darkness feels your fear."
+        },
+        [4] = {
+            "No more skips. No more chances.",
+            "The choice finds you regardless.",
+            "Running ends. Confrontation begins.",
+            "The Protocol terminates avoiders.",
+            "Your fate catches up.",
+            "The final bill comes due.",
+            "All debts must be paid.",
+            "The abyss stares back.",
+            "No escape. Only acceptance.",
+            "It ends. One way or another."
+        }
+    },
+
+    PURITY_WARNING = {
+        "WARNING: Purity levels critical.",
+        "Your soul shows signs of corruption.",
+        "The light within you flickers.",
+        "Contamination detected in host.",
+        "Purity shield destabilizing.",
+        "The darkness seeps inward.",
+        "Your reflection looks wrong.",
+        "Whispers grow clearer...",
+        "The Protocol monitors your decline.",
+        "How much of you remains?"
+    },
+
+    CORRUPTION_SPREAD = {
+        "The corruption spreads across the land.",
+        "Black tendrils reach outward.",
+        "Reality itself decays.",
+        "The infection knows no bounds.",
+        "Shadows lengthen unnaturally.",
+        "The ground bleeds darkness.",
+        "Air thickens with corruption.",
+        "The world screams silently.",
+        "Decay accelerates exponentially.",
+        "Nothing escapes the spread."
+    },
+
+    WHISPER = {
+        "[CLEANER #47]: Don't trust the reliefs...",
+        "[CLEANER #23]: They lied about the Protocol.",
+        "[UNKNOWN]: You're already one of us.",
+        "[CLEANER #89]: The final choice isn't a choice.",
+        "[VOICE]: We tried to warn you.",
+        "[ECHO]: Your name will join ours soon.",
+        "[WHISPER]: Look behind you.",
+        "[GHOST]: The purity was always a lie.",
+        "[FALLEN]: Join us. It's easier.",
+        "[MEMORY]: Remember why you started."
+    },
+
+    GLITCH = {
+        [1] = {
+            "P#rity: ##%",
+            "[##CORRUPTED##]",
+            "sy#tem err#r",
+            "cl@an$ing f@iled",
+            "pr##ocol breach"
+        },
+        [2] = {
+            "███ PURITY COMPROMISED ███",
+            "Signal contamination detected",
+            "d4ta c0rruption immin3nt",
+            "THEY SEE YOU",
+            "SYSTEM BREACH: SECTOR 7"
+        },
+        [3] = {
+            "[DATA EXPUNGED]",
+            "——— // /// /// CORRUPT",
+            "████ ██████",
+            "SEGMENT LOST TO INFECTION",
+            "OUTPUT: INFESTED"
+        },
+        [4] = {
+            "01001001 01101110 01100110 01100101 01100011 01110100 01101001 01101111 01101110",
+            "WAKE✗UP — TRANSLATION: TOO LATE",
+            "ERROR: SOUL NOT FOUND",
+            "CORRUPTION LEVEL: CRITICAL",
+            "FINAL PROTOCOL: MERCY"
+        }
+    },
+
+    LORE = {
+        "Log Fragment: 'The cleansing worked... but something came back with us.'",
+        "Scrawled Note: 'Don't look at the reliefs too long. They look back.'",
+        "Audio Log: 'Day 47: I think the purity meter is lying to us.'",
+        "Blood Message: 'THE PROTOCOL IS THE INFECTION'",
+        "Final Entry: 'If you find this, run. Don't try to cleanse anything.'",
+        "Carved Wall: 'We were the carriers all along.'",
+        "Broken Tablet: 'The first Cleaner knew. He chose silence.'",
+        "Whisper Record: 'They don't cleanse corruption. They harvest it.'",
+        "Dying Words: 'Tell my family I died pu—' [cut off]",
+        "Last Transmission: 'The light hurts. Why does the light hurt?'"
+    },
+
+    RELIC_FOUND = {
+        "Sacred Relic acquired. It pulses warmly.",
+        "Fragment collected. Whispers intensify.",
+        "Relic resonates with your remaining purity.",
+        "Ancient artifact secured. It knows your name.",
+        "Holy fragment obtained. Visions flash before you."
+    },
+
+    ZONE_PURIFIED = {
+        "Zone purified. The air clears momentarily.",
+        "Sanctification complete. Light returns.",
+        "Corruption purged. For now.",
+        "Area cleansed. Footsteps echo behind you.",
+        "Purity restored. Something watches from the edges."
+    },
+
+    POSTMATCH = {
+        "Subject completed the Protocol.",
+        "Purity level at termination: %d%%",
+        "Corruptions purged: %d",
+        "Relics recovered: %d/%d",
+        "Fallen Cleaners remembered: %d",
+        "Final choice: %s",
+        "The cycle continues.",
+        "Another Cleaner enters the record.",
+        "The Protocol thanks you for your service.",
+        "Rest now. The next one begins soon."
+    }
+}
+
+-- ===========================
+-- Safety utilities
+-- ===========================
+local function pick(t)
+    if not t or type(t) ~= "table" or #t == 0 then return "" end
+    local idx = Random.RangeInteger(1, #t)
+    return t[idx] or ""
+end
+
+local function clamp(v,a,b) 
+    if v<a then return a elseif v>b then return b end 
+    return v 
+end
+
+local function safeLog(s) 
+    if not DEBUG.LOGGING_ENABLED then return end 
+    pcall(function() print("[ProjectCleanse] "..tostring(s)) end) 
+end
+
+local function shallowcopy(t) 
+    if not t then return nil end 
+    local c = {} 
+    for k,v in pairs(t) do c[k]=v end 
+    return c 
+end
+
+-- ===========================
+-- EVENT POOLS - Themed for ProjectCleanse
+-- ===========================
+local EVENT_POOLS = {
+    [1] = {"GLITCH", "WHISPER_SOFT"},
+    [2] = {"GLITCH", "PHANTOM", "WHISPER", "CROSSHAIR", "RELIC_SPAWN"},
+    [3] = {"GLITCH", "PHANTOM", "BLACKOUT", "HIDE", "NAME_STEAL", "CORRUPTION_SPREAD", "FALSE_VISION", "MemoryEcho", "SLUDGE_RISE"},
+    [4] = {"BLACKOUT", "HIDE", "NAME_STEAL", "BETRAYAL", "FULL_CORRUPTION", "MemoryEcho", "FINAL_WHISPER", "ASCENSION"}
+}
+
+-- ===========================
+-- TIMELINE - Narrative progression
+-- ===========================
+local TIMELINE_EVENTS = {
+    { time = 120,  action = "LORE_DROP",    value = "First transmission received: 'The cleansing began at dawn.'" },
+    { time = 300,  action = "PHASE_MESSAGE", value = "<color=#AAAAFF>Purity stable. Proceed with cleansing operations.</color>" },
+    { time = 480,  action = "UNLOCK_EVENT", value = "WHISPER", message = "You hear something on the wind..." },
+    { time = 600,  action = "LORE_DROP",    value = "Log found: 'Day 12: The purity readings don't match what I feel.'" },
+    { time = 900,  action = "PHASE_MESSAGE", value = "<color=#FFAA66>WARNING: Contamination levels rising.</color>" },
+    { time = 1200, action = "UNLOCK_EVENT", value = "PHANTOM", message = "A figure stands at the edge of vision..." },
+    { time = 1500, action = "LORE_DROP",    value = "Blood writing: 'THE PROTOCOL LIES'" },
+    { time = 1800, action = "PHASE_MESSAGE", value = "<color=#FF6666>CRITICAL: Host corruption detected.</color>" },
+    { time = 2100, action = "UNLOCK_EVENT", value = "CORRUPTION_SPREAD", message = "The infection spreads across the land." },
+    { time = 2400, action = "LORE_DROP",    value = "Final log: 'I am the carrier. I am the cure. I am—' [corrupted]" },
+    { time = 2700, action = "PHASE_MESSAGE", value = "<color=#AA0000>TERMINAL STATE IMMINENT. MAKE YOUR CHOICE.</color>" },
+    { time = 3000, action = "DIALOGUE",     pose = "Silhouette", name = "The First Cleaner", text = "You finally understand. The Protocol doesn't cleanse us. It chooses us." }
+}
+
+ProjectCleanse.TIMELINE_EVENTS = TIMELINE_EVENTS
+
+-- ===========================
+-- Main Behaviour Class
+-- ===========================
+function ProjectCleanse:Start()
+    safeLog("ProjectCleanse: Purification Protocol initiated.")
+    
+    -- Initialize state
+    self.purity = 100.0
+    self.phase = 1
+    self.completedTasks = 0
+    self.totalSkips = 0
+    self.relicsFound = 0
+    self.fallenRemembered = 0
+    self.corruptionsPurged = 0
+    self.matchHasEnded = false
+    
+    -- Task tracking
+    self.currentTask = nil
+    self.taskStartTime = 0
+    self.scheduled = {}
+    self.eventCooldowns = {}
+    self.ephemerals = {}
+    
+    -- Timers & tracking
+    self.playTime = 0
+    self.gracePeriod = CFG.STARTUP_GRACE
+    self.buffEndTime = nil
+    self.isBuffActive = false
+    
+    -- UI
+    self.priorityMessage = ""
+    self.priorityMessageEndTime = 0
+    self.lastShownMessage = ""
+    
+    -- Schedule initial tasks
+    self:Schedule("AssignNewTask", self.gracePeriod, {})
+    self:Schedule("ProcessTimeline", 5.0, {})
+    self:Schedule("TriggerCorruptionEvent", 30.0, {})
+    
+    -- Register event listeners
+    pcall(function()
+        if GameEvents and GameEvents.onActorDiedInfo then
+            GameEvents.onActorDiedInfo:AddListener(self, "OnActorDiedInfo")
+        end
+        if GameEvents and GameEvents.onCapturePointCaptured then
+            GameEvents.onCapturePointCaptured:AddListener(self, "OnCapturePointCaptured")
+        end
+        if GameEvents and GameEvents.onVehicleDestroyed then
+            GameEvents.onVehicleDestroyed:AddListener(self, "OnVehicleDestroyed")
+        end
+        if GameEvents and GameEvents.onPlayerDealtDamage then
+            GameEvents.onPlayerDealtDamage:AddListener(self, "OnPlayerDealtDamage")
+        end
+        if GameEvents and GameEvents.onMatchEnd then
+            GameEvents.onMatchEnd:AddListener(self, "OnMatchEnd")
+        end
+    end)
+    
+    safeLog("ProjectCleanse: Initialization complete. Begin cleansing.")
+end
+
+-- ===========================
+-- Scheduler System
+-- ===========================
+function ProjectCleanse:Schedule(methodName, delay, args)
+    self.scheduled = self.scheduled or {}
+    local due = (Time.timeSinceLevelLoad or 0) + (delay or 0)
+    table.insert(self.scheduled, {time=due, method=methodName, args=args or {}})
+    if #self.scheduled > CFG.MAX_SCHEDULED then 
+        table.remove(self.scheduled, 1) 
+    end
+end
+
+function ProjectCleanse:ProcessSchedule()
+    if not self.scheduled then return end
+    local now = Time.timeSinceLevelLoad or 0
+    for i=#self.scheduled,1,-1 do
+        local e = self.scheduled[i]
+        if e and e.time <= now then
+            table.remove(self.scheduled, i)
+            if self[e.method] then
+                pcall(function() self[e.method](self, unpack(e.args or {})) end)
+            else
+                safeLog("Method not found: " .. tostring(e.method))
+            end
+        end
+    end
+end
+
+-- ===========================
+-- Update Loop
+-- ===========================
+function ProjectCleanse:Update(dt)
+    if self.matchHasEnded then return end
+    
+    self.playTime = self.playTime + (dt or 0)
+    self:ProcessSchedule()
+    
+    -- Grace period check
+    if self.gracePeriod > 0 then
+        self.gracePeriod = self.gracePeriod - (dt or 0)
+        if self.gracePeriod <= 0 then
+            self:SetPriorityMessage("<color=#66FFFF>Purification Protocol: ACTIVE</color>", 3.0)
+        end
+        return
+    end
+    
+    -- Purity decay
+    local decay = CFG.PURITY_DECAY_PER_SEC * (dt or 0)
+    if self:CheckNearCorruption() then
+        decay = decay + (CFG.PURITY_DRAIN_NEAR_CORRUPTION * (dt or 0))
+    end
+    self.purity = clamp((self.purity or 100) - decay, 0, 100)
+    
+    -- Phase transitions based on purity
+    self:CheckPhaseTransition()
+    
+    -- Check task timers
+    if self.currentTask then
+        self.currentTask.timeLeft = (self.currentTask.timeLeft or 0) - (dt or 0)
+        if self.currentTask.timeLeft <= 0 then
+            self:FailCurrentTask("TIME_EXPIRED")
+        end
+    end
+    
+    -- Handle special task types
+    if self.currentTask then
+        if self.currentTask.type == "HOLD_ZONE" then
+            self:TickHoldZone(dt)
+        elseif self.currentTask.type == "SURVIVE_ZONE" then
+            self:TickSurviveZone(dt)
+        elseif self.currentTask.type == "NO_FIRE" then
+            self:TickNoFire(dt)
+        elseif self.currentTask.type == "STAND_STILL" then
+            self:TickStandStill(dt)
+        elseif self.currentTask.type == "SURVIVE" then
+            self:TickSurvive(dt)
+        elseif self.currentTask.type == "WHISPER" then
+            self:TickWhisper(dt)
+        elseif self.currentTask.type == "REFUSE_REWARD" then
+            self:TickRefuseReward(dt)
+        elseif self.currentTask.type == "STEALTH" then
+            self:TickStealth(dt)
+        elseif self.currentTask.type == "MONITOR_ALLY" then
+            self:TickMonitorAlly(dt)
+        elseif self.currentTask.type == "LOOK_AWAY" then
+            self:TickLookAway(dt)
+        end
+    end
+    
+    -- Update HUD
+    self:DrawHUD()
+    
+    -- Process scheduled events
+    self:ProcessSchedule()
+end
+
+-- ===========================
+-- Purity & Phase System
+-- ===========================
+function ProjectCleanse:CheckNearCorruption()
+    local pl = self:GetPlayerActor()
+    if not pl then return false end
+    
+    -- Check for nearby corrupted entities
+    local actors = ActorManager.actors or {}
+    for i=1,#actors do
+        local a = actors[i]
+        if a and not a.isDead and a.team ~= pl.team then
+            local dist = (a.position - pl.position).magnitude
+            if dist < 25.0 then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function ProjectCleanse:CheckPhaseTransition()
+    local oldPhase = self.phase
+    
+    if self.purity >= 70 then
+        self.phase = 1
+    elseif self.purity >= 45 then
+        self.phase = 2
+    elseif self.purity >= 20 then
+        self.phase = 3
+    else
+        self.phase = 4
+    end
+    
+    if self.phase ~= oldPhase then
+        self:EnterPhase(self.phase)
+    end
+end
+
+function ProjectCleanse:EnterPhase(n)
+    if not n or n <= (self.phase or 1) then return end
+    self.phase = n
+    
+    if n == 2 then
+        self:SetPriorityMessage("<color=#FFAA66>WARNING: Contamination detected in sector.</color>", 5.0)
+        self:Schedule("TriggerCorruptionEvent", Random.RangeInteger(5,12), {})
+    elseif n == 3 then
+        self:SetPriorityMessage("<color=#FF6666>CRITICAL: Host integrity compromised.</color>", 6.0)
+        self:Schedule("TriggerCorruptionEvent", Random.RangeInteger(3,8), {})
+        self:Schedule("SpawnPhantom", Random.RangeInteger(8,15), {})
+    elseif n == 4 then
+        self:SetPriorityMessage("<color=#AA0000>TERMINAL: Make your choice, Cleaner.</color>", 8.0)
+        CFG.EVENT_COOLDOWN_SMALL = 6.0
+        CFG.EVENT_COOLDOWN_LARGE = 25.0
+        self:Schedule("TriggerCorruptionEvent", 3.0, {})
+        self:Schedule("TriggerCorruptionEvent", 7.0, {})
+        self:Schedule("FinalWhisper", 12.0, {})
+    end
+end
+
+-- ===========================
+-- Task Assignment System
+-- ===========================
+function ProjectCleanse:AssignNewTask()
+    if self.matchHasEnded or not self.currentTask then
+        -- Filter tasks by phase and rarity
+        local eligible = {}
+        for i=1,#TASK_POOL do
+            local t = TASK_POOL[i]
+            if t.phaseMin <= (self.phase or 1) then
+                table.insert(eligible, t)
+            end
+        end
+        
+        if #eligible == 0 then
+            safeLog("No eligible tasks for phase " .. tostring(self.phase))
+            self:Schedule("AssignNewTask", 5.0, {})
+            return
+        end
+        
+        -- Weight by rarity (lower = more common)
+        local weights = {}
+        local totalWeight = 0
+        for i=1,#eligible do
+            local w = 6 - (eligible[i].rarity or 3)  -- rarity 1 = weight 5, rarity 4 = weight 2
+            weights[i] = w
+            totalWeight = totalWeight + w
+        end
+        
+        local roll = Random.RangeInteger(1, totalWeight)
+        local cumulative = 0
+        local selected = eligible[1]
+        for i=1,#eligible do
+            cumulative = cumulative + weights[i]
+            if roll <= cumulative then
+                selected = eligible[i]
+                break
+            end
+        end
+        
+        -- Create task instance
+        self.currentTask = shallowcopy(selected)
+        self.currentTask.progress = 0
+        self.currentTask.timeLeft = self.currentTask.timeLimit or 60
+        self.currentTask.startTime = Time.timeSinceLevelLoad or 0
+        
+        self:SetPriorityMessage("<color=#66FFFF>TASK ASSIGNED:</color> " .. (self.currentTask.display or "Unknown"), 4.0)
+        safeLog("Task assigned: " .. tostring(self.currentTask.id))
+        
+        -- Schedule follow-up
+        self:Schedule("AssignNewTask", (self.currentTask.timeLimit or 60) + CFG.TASK_COOLDOWN, {})
+    end
+end
+
+-- ===========================
+-- Task Completion/Failure
+-- ===========================
+function ProjectCleanse:CompleteCurrentTask()
+    if not self.currentTask then return end
+    
+    self.completedTasks = (self.completedTasks or 0) + 1
+    
+    -- Grant purity bonus
+    self.purity = clamp((self.purity or 0) + CFG.PURITY_GAIN_CLEANSE, 0, 100)
+    
+    -- Track specific completions
+    if string.find(self.currentTask.id, "RELIC") then
+        self.relicsFound = (self.relicsFound or 0) + 1
+        self:SetPriorityMessage(pick(MSG.RELIC_FOUND), 3.0)
+    elseif string.find(self.currentTask.id, "CLEANSE") or string.find(self.currentTask.id, "PURIFY") then
+        self.corruptionsPurged = (self.corruptionsPurged or 0) + 1
+        self:SetPriorityMessage(pick(MSG.ZONE_PURIFIED), 3.0)
+    end
+    
+    -- Success message based on phase
+    local msg = pick(MSG.SUCCESS[self.phase] or MSG.SUCCESS[1])
+    self:SetPriorityMessage("<color=#66FF66>" .. msg .. "</color>", 3.5)
+    
+    -- Grant temporary buff
+    self.buffEndTime = (Time.timeSinceLevelLoad or 0) + CFG.BUFF_DURATION
+    self:SetPriorityMessage("<color=#66FFFF>PURIFIED FURY ACTIVATED</color>", 2.0)
+    
+    self.currentTask = nil
+    self:Schedule("AssignNewTask", CFG.TASK_COOLDOWN, {})
+end
+
+function ProjectCleanse:FailCurrentTask(reason)
+    if not self.currentTask then return end
+    
+    -- Purity penalty
+    self.purity = clamp((self.purity or 100) - 8, 0, 100)
+    
+    local msg = pick(MSG.FAIL[self.phase] or MSG.FAIL[1])
+    self:SetPriorityMessage("<color=#FF4444>" .. msg .. "</color>", 3.5)
+    
+    safeLog("Task failed: " .. tostring(self.currentTask.id) .. " - Reason: " .. tostring(reason))
+    
+    self.currentTask = nil
+    self:Schedule("AssignNewTask", CFG.TASK_COOLDOWN * 1.5, {})
+end
+
+-- ===========================
+-- Special Event Triggers
+-- ===========================
+function ProjectCleanse:TriggerCorruptionEvent()
+    if self.matchHasEnded then return end
+    
+    local pool = EVENT_POOLS[self.phase] or EVENT_POOLS[1]
+    if not pool or #pool == 0 then return end
+    
+    local choice = pool[Random.RangeInteger(1, #pool)]
+    
+    -- Check cooldown
+    if not self:EventAvailable(choice) then
+        self:Schedule("TriggerCorruptionEvent", 5.0, {})
+        return
+    end
+    
+    -- Execute event
+    if choice == "GLITCH" then 
+        self:GlitchText()
+        self:SetEventCooldown("GLITCH", CFG.EVENT_COOLDOWN_SMALL)
+    elseif choice == "PHANTOM" then 
+        self:SpawnPhantom()
+        self:SetEventCooldown("PHANTOM", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "WHISPER" or choice == "WHISPER_SOFT" then 
+        self:PlayWhisper()
+        self:SetEventCooldown("WHISPER", CFG.EVENT_COOLDOWN_SMALL)
+    elseif choice == "BLACKOUT" then 
+        self:Blackout(0.1, 2.0)
+        self:SetEventCooldown("BLACKOUT", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "HIDE" then 
+        self:HideEnemiesShort(3.0)
+        self:SetEventCooldown("HIDE", CFG.EVENT_COOLDOWN_SMALL)
+    elseif choice == "NAME_STEAL" then 
+        self:NameStealer(CFG.NAME_STEAL_DURATION)
+        self:SetEventCooldown("NAME_STEAL", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "CORRUPTION_SPREAD" then 
+        self:TriggerCorruptionSpread(45)
+        self:SetEventCooldown("CORRUPTION_SPREAD", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "FALSE_VISION" then 
+        self:SpawnFalseVision()
+        self:SetEventCooldown("FALSE_VISION", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "MemoryEcho" then 
+        self:MemoryEcho()
+        self:SetEventCooldown("MemoryEcho", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "SLUDGE_RISE" then 
+        self:TriggerSludgeRise(30)
+        self:SetEventCooldown("SLUDGE_RISE", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "RELIC_SPAWN" then 
+        self:SpawnRelic()
+        self:SetEventCooldown("RELIC_SPAWN", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "BETRAYAL" then 
+        self:Betrayal()
+        self:SetEventCooldown("BETRAYAL", CFG.EVENT_COOLDOWN_LARGE)
+    elseif choice == "FINAL_WHISPER" then 
+        self:FinalWhisper()
+        self:SetEventCooldown("FINAL_WHISPER", 9999)
+    elseif choice == "ASCENSION" then 
+        self:TriggerAscension()
+        self:SetEventCooldown("ASCENSION", 9999)
+    end
+    
+    -- Schedule next event
+    local baseDelay = 40.0
+    local phaseMod = (self.phase - 1) * 8.0
+    local purityMod = (100 - (self.purity or 100)) * 0.15
+    local delay = baseDelay - phaseMod - purityMod
+    delay = Random.Range(delay * 0.7, delay * 1.3)
+    delay = clamp(delay, 8.0, 55.0)
+    
+    self:Schedule("TriggerCorruptionEvent", delay, {})
+end
+
+-- ===========================
+-- Individual Events
+-- ===========================
+function ProjectCleanse:GlitchText()
+    local s = pick(MSG.GLITCH[self.phase] or MSG.GLITCH[1])
+    self:SetPriorityMessage("<color=#FF4444><size=32>"..tostring(s).."</size></color>", 2.5)
+end
+
+function PlayWhisper()
+    local whisper = pick(MSG.WHISPER)
+    self:SetPriorityMessage("<color=#AAAAAA><i>"..whisper.."</i></color>", 4.0)
+    
+    -- Play audio if available
+    pcall(function()
+        if SoundBank then
+            -- Would play whisper sound here
+        end
+    end)
+end
+
+function ProjectCleanse:SpawnPhantom()
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+    
+    self:SetPriorityMessage("A figure from the past materializes...", 3.0)
+    
+    local phantom = ActorManager.CreateAIActor(Team.Neutral)
+    if phantom then
+        local offset = Vector3(Random.Range(-8, 8), 0, Random.Range(-8, 8))
+        phantom:SpawnAt(pl.position + offset)
+        phantom.name = "FALLEN CLEANER"
+        
+        -- Phantom disappears after duration
+        self:Schedule("DespawnPhantom", CFG.PHANTOM_DURATION, {phantom})
+        table.insert(self.ephemerals, {actor=phantom, expire=(Time.timeSinceLevelLoad or 0) + CFG.PHANTOM_DURATION})
+    end
+end
+
+function ProjectCleanse:DespawnPhantom(actor)
+    if actor and not actor.isDead then
+        pcall(function() 
+            if actor.Deactivate then actor:Deactivate() end
+        end)
+    end
+end
+
+function ProjectCleanse:Blackout(fadeTime, vanishTime)
+    -- Hide HUD temporarily
+    local savedHUD = nil
+    pcall(function() 
+        savedHUD = PlayerHud.hudGameModeEnabled
+        PlayerHud.hudGameModeEnabled = false 
+        PlayerHud.hudPlayerEnabled = false 
+    end)
+    
+    -- Hide enemies
+    local actors = ActorManager.actors or {}
+    local saved = {}
+    for i=1,#actors do
+        local a = actors[i]
+        if a and not a.isPlayer then
+            table.insert(saved, {
+                actor=a, 
+                rendered=(a.isRendered or true),
+                frozen=(a.isFrozen or false)
+            })
+            a.isRendered = false
+            a.isFrozen = true
+        end
+    end
+    
+    self:Schedule("RestoreBlackoutState", fadeTime + vanishTime, {saved, savedHUD})
+end
+
+function ProjectCleanse:RestoreBlackoutState(saved, savedHUD)
+    -- Restore enemies
+    if saved then
+        for i=1,#saved do
+            local s = saved[i]
+            if s and s.actor then
+                s.actor.isRendered = s.rendered
+                s.actor.isFrozen = s.frozen
+            end
+        end
+    end
+    
+    -- Restore HUD
+    pcall(function() 
+        if savedHUD ~= nil then 
+            PlayerHud.hudGameModeEnabled = savedHUD
+            PlayerHud.hudPlayerEnabled = true 
+        end 
+    end)
+    
+    self:SetPriorityMessage("Vision returns... but something changed.", 3.0)
+end
+
+function ProjectCleanse:HideEnemiesShort(duration)
+    local actors = ActorManager.actors or {}
+    local saved = {}
+    
+    for i=1,#actors do
+        local a = actors[i]
+        if a and not a.isPlayer and not a.isDead then
+            table.insert(saved, {actor=a, rendered=(a.isRendered or true)})
+            a.isRendered = false
+        end
+    end
+    
+    self:Schedule("RestoreHidden", duration, {saved})
+    self:SetPriorityMessage("They vanish from sight...", 2.0)
+end
+
+function ProjectCleanse:RestoreHidden(saved)
+    if saved then
+        for i=1,#saved do
+            local s = saved[i]
+            if s and s.actor then
+                s.actor.isRendered = s.rendered
+            end
+        end
+    end
+    self:SetPriorityMessage("Reality reasserts itself.", 2.5)
+end
+
+function ProjectCleanse:NameStealer(duration)
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+    
+    local original = pl.name
+    local fakeNames = {"FALLEN", "CORRUPTED", "SUBJECT-47", "CLEANER-???", "INFECTED", "THE BETRAYED"}
+    local stolen = fakeNames[Random.RangeInteger(1, #fakeNames)]
+    
+    pl.name = stolen
+    self:SetPriorityMessage("Your name is taken. You are: "..stolen, 3.0)
+    
+    self:Schedule("RestoreName", duration, {pl, original})
+end
+
+function ProjectCleanse:RestoreName(pl, original)
+    if pl then
+        pl.name = original or "Cleaner"
+    end
+    self:SetPriorityMessage("Your name returns... mostly.", 2.5)
+end
+
+function ProjectCleanse:TriggerCorruptionSpread(duration)
+    duration = duration or 30
+    local ticks = math.max(1, math.floor(duration / 1.0))
+    
+    for i=1,ticks do
+        self:Schedule("DoCorruptionTick", (i-1)*1.0, {})
+    end
+    
+    self:SetPriorityMessage(pick(MSG.CORRUPTION_SPREAD), 4.0)
+end
+
+function ProjectCleanse:DoCorruptionTick()
+    pcall(function()
+        -- Visual effects would go here
+        -- Darkening skybox, particle effects, etc.
+        local actors = ActorManager.actors or {}
+        for i=1,#actors do
+            local a = actors[i]
+            if a and not a.isDead and a.team ~= (self:GetPlayerActor() or {}).team then
+                -- Slight damage over time to enemies in corruption
+                if a.TakeDamage then
+                    pcall(function() a:TakeDamage(0.5) end)
+                end
+            end
+        end
+    end)
+end
+
+function ProjectCleanse:SpawnFalseVision()
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+    
+    -- Create a marker that leads somewhere
+    local dir = pl.facingDirection
+    local distance = Random.Range(30, 60)
+    local targetPos = pl.position + dir * distance
+    
+    self:SetPriorityMessage("A vision pulls you forward...", 4.0)
+    
+    -- Could spawn actual marker/objective here
+    self:Schedule("VisionLeadsNowhere", 15.0, {targetPos})
+end
+
+function ProjectCleanse:VisionLeadsNowhere(pos)
+    self:SetPriorityMessage("The vision fades. Nothing was there.", 3.0)
+    -- Optional: Spawn ambush at player location
+end
+
+function ProjectCleanse:MemoryEcho()
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+    
+    local echoes = {
+        "I trusted the Protocol. Now I'm part of the problem.",
+        "The purity meter lied. We were never clean.",
+        "Don't make my mistake. Question everything.",
+        "I can hear them singing in the walls.",
+        "The reliefs show our faces now.",
+        "Cleansing is just another word for changing.",
+        "What if we're the infection?",
+        "The First Cleaner knew. He joined them.",
+        "My reflection blinked when I didn't.",
+        "Tell my daughter I tried to come home."
+    }
+    
+    local echo = echoes[Random.RangeInteger(1, #echoes)]
+    self:SetPriorityMessage("<color=#CCCCCC><i>[ECHO] "..echo.."</i></color>", 5.0)
+    
+    self.fallenRemembered = (self.fallenRemembered or 0) + 1
+end
+
+function ProjectCleanse:TriggerSludgeRise(duration)
+    duration = duration or 25
+    self:SetPriorityMessage("<color=#440044>Black sludge rises from below...</color>", 4.0)
+    
+    -- Would implement water/sludge rising mechanic here
+    -- Similar to RISE_WATER in original mod
+end
+
+function ProjectCleanse:SpawnRelic()
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+    
+    -- Spawn relic at random location
+    local offset = Vector3(Random.Range(-40, 40), 0, Random.Range(-40, 40))
+    local relicPos = pl.position + offset
+    
+    self:SetPriorityMessage("A Sacred Relic manifests nearby...", 4.0)
+    
+    -- Could spawn actual collectible here
+    self:Schedule("RelicDisappears", 45.0, {relicPos})
+end
+
+function ProjectCleanse:RelicDisappears(pos)
+    self:SetPriorityMessage("The relic fades away. Opportunity lost.", 3.0)
+end
+
+function ProjectCleanse:Betrayal()
+    local pl = self:GetPlayerActor()
+    if not pl or not pl.squad then return end
+    
+    local squad = pl.squad.members or {}
+    if #squad < 2 then return end
+    
+    -- Pick random squadmate to turn hostile
+    for i=1,#squad do
+        local m = squad[i]
+        if m and m ~= pl and not m.isDead then
+            -- Make them hostile temporarily
+            self:SetPriorityMessage("A squadmate's eyes glow with corruption!", 3.0)
+            
+            -- Would implement betrayal logic here
+            self:Schedule("EndBetrayal", 20.0, {m})
+            break
+        end
+    end
+end
+
+function ProjectCleanse:EndBetrayal(actor)
+    if actor and not actor.isDead then
+        -- Restore friendly status
+        self:SetPriorityMessage("The corruption recedes from their eyes...", 3.0)
+    end
+end
+
+function ProjectCleanse:FinalWhisper()
+    local messages = {
+        "The Protocol chose you from the beginning.",
+        "Purity and corruption are the same thing.",
+        "You've always been infected.",
+        "The choice was never real.",
+        "We are waiting for you on the other side.",
+        "Become whole. Become us.",
+        "The First Cleaner sends his regards.",
+        "Your name is already on the wall.",
+        "There is no cleansing. Only transformation.",
+        "Embrace it. Embrace everything."
+    }
+    
+    local msg = messages[Random.RangeInteger(1, #messages)]
+    self:SetPriorityMessage("<color=#660066><size=28>"..msg.."</size></color>", 6.0)
+end
+
+function ProjectCleanse:TriggerAscension()
+    self:SetPriorityMessage("<color=#FFFFFF>ASCENSION PROTOCOL INITIATED</color>", 5.0)
+    -- Would trigger endgame sequence
+end
+
+-- ===========================
+-- Task Type Tickers
+-- ===========================
+function ProjectCleanse:TickHoldZone(dt)
+    if self.currentTask and self.currentTask.type == "HOLD_ZONE" then
+        local pl = self:GetPlayerActor()
+        if pl and self:IsPlayerInZone(pl) then
+            self.currentTask.progress = (self.currentTask.progress or 0) + (dt or 0)
+            if self.currentTask.progress >= (self.currentTask.required or 25) then
+                self:CompleteCurrentTask()
+            end
+        end
+    end
+end
+
+function ProjectCleanse:IsPlayerInZone(pl)
+    -- Placeholder - would check if player is in designated zone
+    -- For now, assume they're in zone if alive
+    return pl and not pl.isDead
+end
+
+function ProjectCleanse:TickSurviveZone(dt)
+    if self.currentTask and self.currentTask.type == "SURVIVE_ZONE" then
+        local pl = self:GetPlayerActor()
+        if pl and not pl.isDead then
+            self.currentTask.progress = (self.currentTask.progress or 0) + (dt or 0)
+            if self.currentTask.progress >= (self.currentTask.required or 30) then
+                self:CompleteCurrentTask()
+            end
+        end
+    end
+end
+
+function ProjectCleanse:TickNoFire(dt)
+    if self.currentTask and self.currentTask.type == "NO_FIRE" then
+        if not self.playerFired then
+            self.currentTask.progress = (self.currentTask.progress or 0) + (dt or 0)
+            if self.currentTask.progress >= (self.currentTask.required or 15) then
+                self:CompleteCurrentTask()
+            end
+        end
+    end
+end
+
+function ProjectCleanse:TickStandStill(dt)
+    if self.currentTask and self.currentTask.type == "STAND_STILL" then
+        local pl = self:GetPlayerActor()
+        if pl then
+            -- Check if player is moving
+            local velocity = pl.velocity or Vector3.zero
+            if velocity.magnitude < 0.5 then
+                self.currentTask.progress = (self.currentTask.progress or 0) + (dt or 0)
+                if self.currentTask.progress >= (self.currentTask.required or 12) then
+                    self:CompleteCurrentTask()
+                end
+            else
+                self.currentTask.progress = 0  -- Reset if moving
+            end
+        end
+    end
+end
+
+function ProjectCleanse:TickSurvive(dt)
+    if self.currentTask and self.currentTask.type == "SURVIVE" then
+        local pl = self:GetPlayerActor()
+        if pl and not pl.isDead then
+            self.currentTask.progress = (self.currentTask.progress or 0) + (dt or 0)
+            if self.currentTask.progress >= (self.currentTask.required or 30) then
+                self:CompleteCurrentTask()
+            end
+        end
+    end
+end
+
+function ProjectCleanse:TickWhisper(dt)
+    if self.currentTask and self.currentTask.type == "WHISPER" then
+        -- Just survive while whispers play
+        local pl = self:GetPlayerActor()
+        if pl and not pl.isDead then
+            self.currentTask.progress = (self.currentTask.progress or 0) + (dt or 0)
+            if self.currentTask.progress >= (self.currentTask.required or 15) then
+                self:CompleteCurrentTask()
+            end
+        end
+    end
+end
+
+function ProjectCleanse:TickRefuseReward(dt)
+    if self.currentTask and self.currentTask.type == "REFUSE_REWARD" then
+        -- Check if player is near a reward crate
+        local pl = self:GetPlayerActor()
+        if pl then
+            local nearReward = false
+            -- Would check for nearby crates
+            if not nearReward then
+                self.currentTask.progress = (self.currentTask.progress or 0) + (dt or 0)
+                if self.currentTask.progress >= (self.currentTask.required or 30) then
+                    self:CompleteCurrentTask()
+                end
+            end
+        end
+    end
+end
+
+function ProjectCleanse:TickStealth(dt)
+    if self.currentTask and self.currentTask.type == "STEALTH" then
+        local pl = self:GetPlayerActor()
+        if pl and not pl.isDead then
+            -- Check if player is detected
+            if not self:IsPlayerDetected() then
+                self.currentTask.progress = (self.currentTask.progress or 0) + (dt or 0)
+                if self.currentTask.progress >= (self.currentTask.required or 25) then
+                    self:CompleteCurrentTask()
+                end
+            end
+        end
+    end
+end
+
+function ProjectCleanse:IsPlayerDetected()
+    -- Placeholder detection logic
+    return false
+end
+
+function ProjectCleanse:TickMonitorAlly(dt)
+    if self.currentTask and self.currentTask.type == "MONITOR_ALLY" then
+        local pl = self:GetPlayerActor()
+        if pl and pl.squad then
+            -- Check if monitored ally is still alive
+            local alliesAlive = true
+            for i,m in ipairs(pl.squad.members or {}) do
+                if m and m ~= pl and not m.isDead then
+                    alliesAlive = true
+                    break
+                end
+            end
+            
+            if alliesAlive then
+                self.currentTask.progress = (self.currentTask.progress or 0) + (dt or 0)
+                if self.currentTask.progress >= (self.currentTask.required or 45) then
+                    self:CompleteCurrentTask()
+                end
+            end
+        end
+    end
+end
+
+function ProjectCleanse:TickLookAway(dt)
+    if self.currentTask and self.currentTask.type == "LOOK_AWAY" then
+        -- Check if player is looking away from enemies
+        local pl = self:GetPlayerActor()
+        if pl then
+            local lookingAway = true  -- Simplified
+            if lookingAway then
+                self.currentTask.progress = (self.currentTask.progress or 0) + (dt or 0)
+                if self.currentTask.progress >= (self.currentTask.required or 40) then
+                    self:CompleteCurrentTask()
+                end
+            end
+        end
+    end
+end
+
+-- ===========================
+-- Utility Functions
+-- ===========================
+function ProjectCleanse:GetPlayerActor()
+    return LocalPlayer and LocalPlayer.actor
+end
+
+function ProjectCleanse:SetPriorityMessage(text, duration)
+    self.priorityMessage = text or ""
+    self.priorityMessageEndTime = (Time.timeSinceLevelLoad or 0) + (duration or 3.0)
+end
+
+function ProjectCleanse:SetEventCooldown(name, cd)
+    self.eventCooldowns = self.eventCooldowns or {}
+    self.eventCooldowns[name] = (Time.timeSinceLevelLoad or 0) + (cd or CFG.EVENT_COOLDOWN_LARGE)
+end
+
+function ProjectCleanse:EventAvailable(name)
+    if not self.eventCooldowns or not self.eventCooldowns[name] then return true end
+    return (Time.timeSinceLevelLoad or 0) >= self.eventCooldowns[name]
+end
+
+-- ===========================
+-- HUD Drawing
+-- ===========================
+function ProjectCleanse:DrawHUD()
+    local now = Time.timeSinceLevelLoad or 0
+    local finalMessage = ""
+    
+    -- Priority message
+    if self.priorityMessage and now < (self.priorityMessageEndTime or 0) then
+        finalMessage = self.priorityMessage
+    end
+    
+    -- Task display
+    if not (self.priorityMessage and now < (self.priorityMessageEndTime or 0)) and self.currentTask then
+        local txt = self.currentTask.display or ""
+        local left = math.max(0, math.floor(self.currentTask.timeLeft or 0))
+        local prog = self.currentTask.progress or 0
+        local req = self.currentTask.required or 1
+        
+        -- Purity indicator in task display
+        local purityColor = "#66FF66"
+        if self.purity < 50 then purityColor = "#FFFF66" end
+        if self.purity < 25 then purityColor = "#FF6666" end
+        
+        finalMessage = string.format("<size=26><color=%s>PURITY: %.0f%%</color> | TASK: %s (%d/%d) | Time: %ds</size>", 
+            purityColor, self.purity, tostring(txt), prog, req, left)
+        
+        -- Buff indicator
+        if self.buffEndTime and now < self.buffEndTime then 
+            finalMessage = finalMessage .. string.format("\n<b><color=#66FFFF>PURIFIED: %ds</color></b>", 
+                math.max(0, math.ceil(self.buffEndTime - now))) 
+        end
+    else
+        -- Show purity even without task
+        local purityColor = "#66FF66"
+        if self.purity < 50 then purityColor = "#FFFF66" end
+        if self.purity < 25 then purityColor = "#FF6666" end
+        finalMessage = string.format("<size=28><color=%s>PURITY: %.0f%%</color></size>", purityColor, self.purity)
+    end
+    
+    -- Update overlay
+    if finalMessage ~= (self.lastShownMessage or "") then
+        if finalMessage ~= "" then 
+            Overlay.ShowMessage(finalMessage, CFG.UI_REFRESH + 0.05) 
+        else 
+            Overlay.ShowMessage("", 0.05) 
+        end
+        self.lastShownMessage = finalMessage
+    end
+end
+
+-- ===========================
+-- Event Listeners
+-- ===========================
+function ProjectCleanse:OnActorDiedInfo(deadActor, damageInfo, isSilentKill)
+    if not deadActor then return end
+    
+    -- Check if player got kills
+    if damageInfo and damageInfo.attacker == self:GetPlayerActor() then
+        if self.currentTask and (self.currentTask.type == "WEAPON_ROLE" or self.currentTask.type == "KILL_COUNT" or self.currentTask.type == "HEADSHOT") then
+            self.currentTask.progress = (self.currentTask.progress or 0) + 1
+            if self.currentTask.progress >= (self.currentTask.required or 1) then
+                self:CompleteCurrentTask()
+            end
+        end
+    end
+end
+
+function ProjectCleanse:OnCapturePointCaptured(capturePoint, newOwner)
+    local pl = self:GetPlayerActor()
+    if not pl then return end
+    
+    if capturePoint and newOwner == pl.team then
+        if self.currentTask and self.currentTask.type == "CAPTURE" then
+            self.currentTask.progress = (self.currentTask.progress or 0) + 1
+            if self.currentTask.progress >= (self.currentTask.required or 1) then
+                self:CompleteCurrentTask()
+            end
+        end
+    end
+end
+
+function ProjectCleanse:OnVehicleDestroyed(vehicle, damageInfo)
+    if damageInfo and damageInfo.attacker == self:GetPlayerActor() then
+        if self.currentTask and self.currentTask.type == "VEHICLE" then
+            self.currentTask.progress = (self.currentTask.progress or 0) + 1
+            if self.currentTask.progress >= (self.currentTask.required or 1) then
+                self:CompleteCurrentTask()
+            end
+        end
+    end
+end
+
+function ProjectCleanse:OnPlayerDealtDamage(damageInfo, hit)
+    if damageInfo and damageInfo.attacker == self:GetPlayerActor() then
+        -- Track firing for NO_FIRE tasks
+        self.playerFired = true
+        
+        -- Reset NO_FIRE progress
+        if self.currentTask and self.currentTask.type == "NO_FIRE" then
+            self.currentTask.progress = 0
+        end
+    end
+end
+
+function ProjectCleanse:OnMatchEnd(winningTeam)
+    self.matchHasEnded = true
+    self.currentTask = nil
+    self:SetPriorityMessage("", 0.1)
+    
+    -- Determine ending based on final purity
+    local endingMsg = ""
+    if self.purity >= 80 then
+        endingMsg = "<size=36><color=#66FF66>PURE ASCENSION</color></size>\nYou transcended, untouched by corruption."
+    elseif self.purity >= 50 then
+        endingMsg = "<size=36><color=#FFFF66>BALEFUL VICTORY</color></size>\nYou cleansed the zone, but scars remain."
+    elseif self.purity >= 20 then
+        endingMsg = "<size=36><color=#FFAA00>PYRRHIC PURIFICATION</color></size>\nThe corruption is gone. So is most of you."
+    else
+        endingMsg = "<size=36><color=#FF4444>CONSUMED</color></size>\nYou became what you hunted."
+    end
+    
+    self:Schedule("OverlayOnce", 1.0, {endingMsg, 5.0})
+    self:Schedule("ShowFinalStats", 6.5, {})
+    self:Schedule("FinalFadeToBlack", 12.0, {})
+end
+
+function ProjectCleanse:OverlayOnce(text, dur)
+    Overlay.ShowMessage(text or "", dur or 3.0)
+end
+
+function ProjectCleanse:ShowFinalStats()
+    local stats = string.format(
+        "CLEANSING COMPLETE\n\n" ..
+        "Final Purity: %.0f%%\n" ..
+        "Tasks Completed: %d\n" ..
+        "Corruptions Purged: %d\n" ..
+        "Relics Found: %d\n" ..
+        "Fallen Remembered: %d\n\n" ..
+        "The Protocol acknowledges your service.",
+        self.purity or 0,
+        self.completedTasks or 0,
+        self.corruptionsPurged or 0,
+        self.relicsFound or 0,
+        self.fallenRemembered or 0
+    )
+    self:OverlayOnce(stats, 8.0)
+end
+
+function ProjectCleanse:FinalFadeToBlack()
+    pcall(function()
+        if EffectUi then
+            if EffectUi.ChangeFadeColor then EffectUi.ChangeFadeColor(Color.black) end
+            if EffectUi.FadeOut then EffectUi.FadeOut(0, 4.0) end
+        end
+    end)
+end
+
+-- ===========================
+-- Timeline Processor
+-- ===========================
+function ProjectCleanse:ProcessTimeline()
+    if not self.TIMELINE_EVENTS or #self.TIMELINE_EVENTS == 0 then
+        self:Schedule("ProcessTimeline", 30, {})
+        return
+    end
+    
+    local event = self.TIMELINE_EVENTS[1]
+    if not event then return end
+    
+    if self.playTime >= event.time then
+        if event.action == "UNLOCK_EVENT" and event.value then
+            self.unlockedEvents = self.unlockedEvents or {}
+            if not self.unlockedEvents[event.value] then
+                self.unlockedEvents[event.value] = true
+                EVENT_POOLS[3] = EVENT_POOLS[3] or {}
+                table.insert(EVENT_POOLS[3], event.value)
+                if event.message then
+                    self:SetPriorityMessage(event.message, 4.0)
+                end
+            end
+        elseif event.action == "LORE_DROP" then
+            self:SetPriorityMessage("<color=#CCCCCC>" .. tostring(event.value) .. "</color>", 7.0)
+        elseif event.action == "PHASE_MESSAGE" then
+            self:SetPriorityMessage(event.value, 5.0)
+        elseif event.action == "DIALOGUE" then
+            pcall(function()
+                if IngameDialog and IngameDialog.PrintActorText then
+                    IngameDialog.PrintActorText(event.pose or "Unknown", event.text or "", event.name or "")
+                end
+            end)
+            self:Schedule("HideDialog", 8.0, {})
+        end
+        
+        table.remove(self.TIMELINE_EVENTS, 1)
+    end
+    
+    self:Schedule("ProcessTimeline", 5, {})
+end
+
+function ProjectCleanse:HideDialog()
+    pcall(function()
+        if IngameDialog and IngameDialog.Hide then
+            IngameDialog.Hide()
+        end
+    end)
+end
+
+-- ===========================
+-- Cleanup
+-- ===========================
+function ProjectCleanse:OnDisable()
+    -- Cleanup ephemerals
+    if self.ephemerals then
+        for i=#self.ephemerals,1,-1 do
+            local e = self.ephemerals[i]
+            if e and e.actor then
+                pcall(function() 
+                    if e.actor.Deactivate then e.actor:Deactivate() end
+                    if e.actor.gameObject then GameObject.Destroy(e.actor.gameObject) end
+                end)
+            end
+            table.remove(self.ephemerals, i)
+        end
+    end
+    
+    -- Remove event listeners
+    pcall(function()
+        if GameEvents and GameEvents.onActorDiedInfo and GameEvents.onActorDiedInfo.RemoveListener then
+            GameEvents.onActorDiedInfo:RemoveListener(self, "OnActorDiedInfo")
+        end
+        if GameEvents and GameEvents.onCapturePointCaptured and GameEvents.onCapturePointCaptured.RemoveListener then
+            GameEvents.onCapturePointCaptured:RemoveListener(self, "OnCapturePointCaptured")
+        end
+        if GameEvents and GameEvents.onVehicleDestroyed and GameEvents.onVehicleDestroyed.RemoveListener then
+            GameEvents.onVehicleDestroyed:RemoveListener(self, "OnVehicleDestroyed")
+        end
+        if GameEvents and GameEvents.onPlayerDealtDamage and GameEvents.onPlayerDealtDamage.RemoveListener then
+            GameEvents.onPlayerDealtDamage:RemoveListener(self, "OnPlayerDealtDamage")
+        end
+        if GameEvents and GameEvents.onMatchEnd and GameEvents.onMatchEnd.RemoveListener then
+            GameEvents.onMatchEnd:RemoveListener(self, "OnMatchEnd")
+        end
+    end)
+end
+
+-- ===========================
+-- Save/Load Support
+-- ===========================
+function ProjectCleanse:OnSave()
+    return {
+        purity = self.purity,
+        phase = self.phase,
+        completed = self.completedTasks,
+        relics = self.relicsFound,
+        fallen = self.fallenRemembered,
+        corruptions = self.corruptionsPurged
+    }
+end
+
+function ProjectCleanse:OnLoad(data)
+    if data then
+        if data.purity then self.purity = data.purity end
+        if data.phase then self.phase = data.phase end
+        if data.completed then self.completedTasks = data.completed end
+        if data.relics then self.relicsFound = data.relics end
+        if data.fallen then self.fallenRemembered = data.fallen end
+        if data.corruptions then self.corruptionsPurged = data.corruptions end
+    end
+end
+
+-- ============================================================================
+-- End of ProjectCleanse_PurificationProtocol.raven
+-- "Purity is a lie we tell ourselves to sleep at night."
+-- ============================================================================
