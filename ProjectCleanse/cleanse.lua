@@ -2,6 +2,7 @@
 -- A horror mutator disguised as a performance optimizer
 -- Inspired by cursed mods and broken scripts
 -- FIXED VERSION - Robust error handling
+-- UPDATED: Added Tinnitus audio effect
 
 behaviour("ProjectCleanse")
 
@@ -10,6 +11,14 @@ local PHASE_DURATION = 45 -- Seconds per phase (adjust for faster/slower horror)
 local BOT_SPEED_MULTIPLIER = 2.5
 local BOT_DAMAGE_MULTIPLIER = 3.0
 
+-- Tinnitus Configuration
+local TINNITUS_ENABLED = true
+local TINNITUS_THRESHOLD_PHASE = 2  -- Phase at which tinnitus starts
+local TINNITUS_BASE_VOLUME = 0.15   -- Base volume (0.0 - 1.0) - INCREASED for audibility
+local TINNITUS_MAX_VOLUME = 0.5     -- Maximum volume at phase 6
+local TINNITUS_FREQUENCY = 8000     -- High pitch frequency in Hz (typical tinnitus range: 4000-12000)
+local TINNITUS_PULSE_RATE = 0.5     -- How often the ringing pulses (times per second)
+
 -- Phase states
 local currentPhase = 1
 local phaseTimer = 0
@@ -17,6 +26,11 @@ local totalTime = 0
 local playerKilled = false
 local glitchActive = false
 local glitchTimer = 0
+
+-- Tinnitus state
+local tinnitusAudioSource = nil
+local tinnitusVolume = 0
+local tinnitusPulsePhase = 0
 
 -- Store original values for restoration
 local originalFogColor = nil
@@ -96,6 +110,106 @@ end
 local function lerpColor(color1, color2, t)
     if not color1 or not color2 then return color1 or Color.black end
     return Color.Lerp(color1, color2, math.max(0, math.min(1, t)))
+end
+
+-- Tinnitus audio generation using Unity's AudioClip
+local function createTinnitusClip()
+    local duration = 2.0  -- 2 second loop
+    local sampleRate = 48000
+    local totalSamples = duration * sampleRate
+    local clip = AudioClip.Create("TinnitusRing", totalSamples, 1, sampleRate, false)
+    
+    local data = {}
+    for i = 0, totalSamples - 1 do
+        local t = i / sampleRate
+        -- Generate high-frequency sine wave (tinnitus ringing)
+        local sample = math.sin(2 * math.pi * TINNITUS_FREQUENCY * t)
+        
+        -- Add subtle variation to make it more realistic/annoying
+        local variation = math.sin(2 * math.pi * (TINNITUS_FREQUENCY * 1.02) * t) * 0.3
+        sample = sample + variation
+        
+        -- Normalize to prevent clipping
+        sample = sample * 0.5
+        
+        data[i + 1] = sample
+    end
+    
+    clip:SetData(data, 0)
+    return clip
+end
+
+-- Initialize tinnitus audio source
+local function initTinnitus()
+    if not TINNITUS_ENABLED then return end
+    
+    pcall(function()
+        local player = ActorManager.GetActorsOnTeam(0)
+        if not player or #player == 0 then return end
+        
+        for i = 1, #player do
+            if player[i] and player[i].isPlayer then
+                local playerObj = player[i].gameObject
+                if playerObj then
+                    -- Get or create AudioSource component
+                    tinnitusAudioSource = playerObj:GetComponent("AudioSource")
+                    if not tinnitusAudioSource then
+                        tinnitusAudioSource = playerObj:AddComponent("AudioSource")
+                    end
+                    
+                    if tinnitusAudioSource then
+                        -- Configure audio source
+                        tinnitusAudioSource.loop = true
+                        tinnitusAudioSource.playOnAwake = false
+                        tinnitusAudioSource.spatialBlend = 0  -- 2D sound (not affected by position)
+                        tinnitusAudioSource.priority = 1      -- High priority
+                        tinnitusAudioSource.volume = 0
+                        
+                        -- Create and assign the tinnitus clip
+                        local clip = createTinnitusClip()
+                        if clip then
+                            tinnitusAudioSource.clip = clip
+                            print("[Project: CLEANSE] Tinnitus audio initialized.")
+                        end
+                    end
+                end
+                break
+            end
+        end
+    end)
+end
+
+-- Update tinnitus volume based on phase
+local function updateTinnitus(dt)
+    if not TINNITUS_ENABLED or not tinnitusAudioSource then return end
+    
+    pcall(function()
+        -- Calculate target volume based on current phase
+        local targetVolume = 0
+        if currentPhase >= TINNITUS_THRESHOLD_PHASE then
+            -- Linear interpolation from base to max volume based on phase
+            local phaseProgress = (currentPhase - TINNITUS_THRESHOLD_PHASE) / (6 - TINNITUS_THRESHOLD_PHASE)
+            targetVolume = TINNITUS_BASE_VOLUME + (TINNITUS_MAX_VOLUME - TINNITUS_BASE_VOLUME) * phaseProgress
+        end
+        
+        -- Smoothly interpolate current volume to target
+        tinnitusVolume = tinnitusVolume + (targetVolume - tinnitusVolume) * dt * 2
+        
+        -- Add pulsing effect
+        tinnitusPulsePhase = tinnitusPulsePhase + dt * TINNITUS_PULSE_RATE * 2 * math.pi
+        local pulseMultiplier = 0.7 + 0.3 * math.sin(tinnitusPulsePhase)
+        
+        -- Apply volume with pulse
+        local finalVolume = tinnitusVolume * pulseMultiplier
+        tinnitusAudioSource.volume = math.max(0, math.min(1, finalVolume))
+        
+        -- Play if not playing and volume > 0
+        if finalVolume > 0.01 and not tinnitusAudioSource.isPlaying then
+            tinnitusAudioSource:Play()
+        elseif finalVolume <= 0.01 and tinnitusAudioSource.isPlaying then
+            tinnitusAudioSource:Stop()
+        end
+    end)
 end
 
 function ProjectCleanse:Awake()
